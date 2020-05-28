@@ -1,4 +1,4 @@
-name: Docker beta build
+name: Build and publish develop image
 
 on:
     push:
@@ -11,15 +11,13 @@ jobs:
         name: Build image job
         steps:
             - name: Checkout master
-              uses: actions/checkout@v2
-              with:
-                fetch-depth: 0
+              uses: actions/checkout@master
             - name: Build and publish image
-              uses: ilteoood/docker_buildx@439099796bfc03dd9cedeb72a0c7cb92be5cc92c
+              uses: ilteoood/docker_buildx@master
               with:
                 tag: beta
                 imageName: rclone/rclone
-                platform: linux/amd64,linux/386,linux/arm64,linux/arm/v7
+                platform: linux/amd64,linux/arm64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
                 publish: true
                 dockerHubUser: ${{ secrets.DOCKER_HUB_USER }}
                 dockerHubPassword: ${{ secrets.DOCKER_HUB_PASSWORD }}
