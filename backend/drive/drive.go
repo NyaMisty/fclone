@@ -15,6 +15,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"mime"
 	"net/http"
 	"net/url"
@@ -227,6 +228,9 @@ in with the ID of the root folder.
 		}, {
 			Name: "service_account_file",
 			Help: "Service Account Credentials JSON file path \nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
+		}, {
+			Name: "service_account_file_path",
+			Help: "Service Account Credentials JSON folder path.",
 		}, {
 			Name:     "service_account_credentials",
 			Help:     "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -509,6 +513,7 @@ type Options struct {
 	Scope                     string               `config:"scope"`
 	RootFolderID              string               `config:"root_folder_id"`
 	ServiceAccountFile        string               `config:"service_account_file"`
+	ServiceAccountFilePath    string               `config:"service_account_file_path"`
 	ServiceAccountCredentials string               `config:"service_account_credentials"`
 	TeamDriveID               string               `config:"team_drive"`
 	AuthOwnerOnly             bool                 `config:"auth_owner_only"`
@@ -558,6 +563,11 @@ type Fs struct {
 	isTeamDrive      bool               // true if this is a team drive
 	fileFields       googleapi.Field    // fields to fetch file info with
 	m                configmap.Mapper
+	// DriveMod: service account
+	ServiceAccountFiles map[string]int
+	serviceAccountMutex sync.Mutex
+	FileObj             *fs.Object
+	FileName            string
 }
 
 type baseObject struct {
@@ -628,6 +638,15 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 		if len(gerr.Errors) > 0 {
 			reason := gerr.Errors[0].Reason
 			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" {
+				// DriveMod: change service account
+				if ok, _ := f.shouldChangeSA(); ok {
+					f.serviceAccountMutex.Lock()
+					if e := f.changeServiceAccount(reason); e != nil {
+						fs.Errorf(f, "Change service account error: %v", err)
+					}
+					f.serviceAccountMutex.Unlock()
+					return true, err
+				}
 				if f.opt.StopOnUploadLimit && gerr.Errors[0].Message == "User rate limit exceeded." {
 					fs.Errorf(f, "Received upload limit error: %v", err)
 					return false, fserrors.FatalError(err)
@@ -997,6 +1016,16 @@ func createOAuthClient(opt *Options, name string, m configmap.Mapper) (*http.Cli
 	var oAuthClient *http.Client
 	var err error
 
+	// DriveMod: try to find service account file if not set
+	if len(opt.ServiceAccountFile) == 0 {
+		if files, err := loadServiceAccountFiles(opt); err == nil {
+			if filePath, err := pickServiceAccountFile(files, true, false); err == nil {
+				opt.ServiceAccountFile = filePath
+				fs.Debugf(nil, "Assigned Service Account File to %s", filePath)
+			}
+		}
+	}
+
 	// try loading service account credentials from env variable, then from a file
 	if len(opt.ServiceAccountCredentials) == 0 && opt.ServiceAccountFile != "" {
 		loadedCreds, err := ioutil.ReadFile(os.ExpandEnv(opt.ServiceAccountFile))
@@ -1056,6 +1085,26 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	// Parse config into Options struct
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
+
+	// DriveMod: parse object id from path remote:{ID}
+	isFileID := false
+	if path != "" && path[0:1] == "{" {
+		idIndex := strings.Index(path, "}")
+		if idIndex > 0 {
+			rootID := path[1:idIndex]
+			name += rootID
+			//opt.ServerSideAcrossConfigs = true
+			if len(rootID) == 33 || len(rootID) == 28 {
+				isFileID = true
+				opt.RootFolderID = rootID
+			} else {
+				opt.RootFolderID = rootID
+				opt.TeamDriveID = rootID
+			}
+			path = path[idIndex+1:]
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -1148,6 +1197,28 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	_, f.importMimeTypes, err = parseExtensions(opt.ImportExtensions)
 	if err != nil {
 		return nil, err
+	}
+
+	// DriveMod: confirm the object ID is file
+	if isFileID {
+		file, err := f.svc.Files.Get(opt.RootFolderID).Fields("name", "id", "size", "mimeType").SupportsAllDrives(true).Do()
+		if err == nil {
+			//fmt.Println("file.MimeType", file.MimeType)
+			if "application/vnd.google-apps.folder" != file.MimeType && file.MimeType != "" {
+				tempF := *f
+				newRoot := ""
+				tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
+				tempF.root = newRoot
+				f.dirCache = tempF.dirCache
+				f.root = tempF.root
+
+				extension, exportName, exportMimeType, isDocument := f.findExportFormat(file)
+				obj, _ := f.newObjectWithExportInfo(file.Name, file, extension, exportName, exportMimeType, isDocument)
+				f.root = "isFile:" + file.Name
+				f.FileObj = &obj
+				return f, fs.ErrorIsFile
+			}
+		}
 	}
 
 	// Find the current root
@@ -1356,6 +1427,11 @@ func (f *Fs) newObjectWithExportInfo(
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error fs.ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	// DriveMod
+	if f.FileObj != nil {
+		return *f.FileObj, nil
+	}
+
 	info, extension, exportName, exportMimeType, isDocument, err := f.getRemoteInfoWithExport(ctx, remote)
 	if err != nil {
 		return nil, err
@@ -2745,6 +2821,115 @@ func (f *Fs) changeChunkSize(chunkSizeString string) (err error) {
 	return err
 }
 
+// DriveMod: shouldChangeSA determines whether multiple service accounts existed
+func (f *Fs) shouldChangeSA() (bool, error) {
+	if len(f.opt.ServiceAccountFilePath) > 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// DriveMod:: loadServiceAccountFiles load service account file from folder (recursive)
+func loadServiceAccountFiles(opt *Options) (map[string]int, error) {
+	list := make(map[string]int)
+
+	// Read service account file from folder
+	saFolder := opt.ServiceAccountFilePath
+	if len(saFolder) > 0 {
+		fs.Debugf(nil, "Loading Service Account File(s) from %q", saFolder)
+		files, err := ioutil.ReadDir(saFolder)
+		if err != nil {
+			return list, errors.Wrap(err, "error loading service account from folder")
+		}
+
+		// Add valid service account file
+		for i, file := range files {
+			filePath := path.Join(saFolder, file.Name())
+			if filePath == opt.ServiceAccountFile || path.Ext(filePath) != ".json" {
+				continue
+			}
+			list[filePath] = i
+		}
+	}
+
+	fs.Debugf(nil, "Loaded %d Service Account File(s)", len(list))
+	return list, nil
+}
+func (f *Fs) loadServiceAccountFiles() (map[string]int, error) {
+	opt := &f.opt
+	return loadServiceAccountFiles(opt)
+}
+
+// DriveMod:: pickServiceAccountFile
+func pickServiceAccountFile(list map[string]int, random bool, pop bool) (filePath string, err error) {
+	if len(list) == 0 {
+		err = errors.Errorf("no available service account file")
+		return
+	}
+
+	// Select by random
+	r := rand.Intn(len(list))
+	for k := range list {
+		if r == 0 {
+			filePath = k
+		}
+		r--
+	}
+	if pop {
+		delete(list, filePath)
+	}
+	return
+}
+func (f *Fs) pickServiceAccountFile(random bool, pop bool) (filePath string, err error) {
+	// opt := &f.opt
+	list := make(map[string]int)
+
+	// Load if not initialized
+	if f.ServiceAccountFiles == nil {
+		list, err = f.loadServiceAccountFiles()
+		if err != nil {
+			return
+		}
+		f.ServiceAccountFiles = list
+	}
+
+	return pickServiceAccountFile(f.ServiceAccountFiles, random, pop)
+}
+
+// DriveMod: changeServiceAccount change service account from list
+// Read json from folder if empty.
+func (f *Fs) changeServiceAccount(reason string) error {
+	// opt := &f.opt
+
+	// Load
+	if len(f.ServiceAccountFiles) == 0 {
+		list, err := f.loadServiceAccountFiles()
+		if err != nil {
+			return err
+		}
+		f.ServiceAccountFiles = list
+	}
+
+	if len(f.ServiceAccountFiles) == 0 {
+		return errors.Errorf("no available service account file")
+	}
+
+	// Pop service account
+	filePath, err := f.pickServiceAccountFile(true, true)
+	if err == nil {
+		err = f.changeServiceAccountFile(filePath)
+	}
+
+	fs.Infof(nil, "Service Account Changed (remain: %d, reason: %s)", len(f.ServiceAccountFiles), reason)
+
+	// Create new pacer
+	// if err == nil {
+	// 	f.pacer = newPacer(opt)
+	// }
+
+	return err
+}
+
 func (f *Fs) changeServiceAccountFile(file string) (err error) {
 	fs.Debugf(nil, "Changing Service Account File from %s to %s", f.opt.ServiceAccountFile, file)
 	if file == f.opt.ServiceAccountFile {
@@ -2771,6 +2956,9 @@ func (f *Fs) changeServiceAccountFile(file string) (err error) {
 	if err != nil {
 		return errors.Wrap(err, "drive: failed when making oauth client")
 	}
+
+	f.pacer = newPacer(&f.opt)
+
 	f.client = oAuthClient
 	f.svc, err = drive.New(f.client)
 	if err != nil {
