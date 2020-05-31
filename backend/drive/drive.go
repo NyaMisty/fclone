@@ -3018,7 +3018,7 @@ func (f *Fs) changeServiceAccount(reason string) error {
 		err = f.changeServiceAccountFile(file)
 	}
 
-	fs.Debugf(nil, "Service Account Changed (remain: %d, reason: %s, project (%d): %s)", f.ServiceAccountBox.Size(), reason, f.ServiceAccountBox.CurrentProjectWeight, f.ServiceAccountBox.CurrentProjectKey)
+	fs.Infof(nil, "Service Account Changed (remain: %d, reason: %s, project (%d): %s)", f.ServiceAccountBox.Size(), reason, f.ServiceAccountBox.CurrentProjectWeight, f.ServiceAccountBox.CurrentProjectKey)
 	return err
 }
 
