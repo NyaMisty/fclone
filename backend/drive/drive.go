@@ -623,8 +623,8 @@ func newServiceAccountBox() *ServiceAccountBox {
 func (b *ServiceAccountBox) Load(opt *Options) (err error) {
 	root := opt.ServiceAccountFilePath
 	if len(root) > 0 {
+		fs.Debugf(nil, "Loading Service Account File(s) from %q", root)
 		if _, err := os.Stat(root); !os.IsNotExist(err) {
-			fs.Debugf(nil, "Loading Service Account File(s) from %q", root)
 			err := filepath.Walk(root,
 				func(path string, f os.FileInfo, err error) error {
 					if err != nil {
@@ -640,9 +640,10 @@ func (b *ServiceAccountBox) Load(opt *Options) (err error) {
 				return errors.Wrap(err, "error loading service account from folder")
 			}
 		}
+		fs.Debugf(nil, "Loaded %d Service Account File(s) from %d Project(s)", b.Size(), b.ProjectSize())
+
 	}
 
-	fs.Debugf(nil, "Loaded %d Service Account File(s) from %d Project(s)", b.Size(), b.ProjectSize())
 	return err
 }
 
@@ -722,6 +723,11 @@ func (b *ServiceAccountBox) GetProjectKey(random bool) string {
 
 // GetAccount ...
 func (b *ServiceAccountBox) GetAccount(random bool, pop bool) (file string, err error) {
+	if len(b.Projects) == 0 {
+		err = errors.Errorf("no available projects")
+		return
+	}
+
 	// Select project
 	projectKey := b.GetProjectKey(false)
 	project := b.Projects[projectKey]
@@ -729,6 +735,11 @@ func (b *ServiceAccountBox) GetAccount(random bool, pop bool) (file string, err 
 	b.Weights[projectKey]++
 	b.CurrentProjectKey = projectKey
 	b.CurrentProjectWeight = b.Weights[projectKey]
+
+	if len(project) == 0 {
+		err = errors.Errorf("no available accounts")
+		return
+	}
 
 	// Select file
 	r := rand.Intn(len(project))
