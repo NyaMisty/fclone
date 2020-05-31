@@ -21,6 +21,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -564,7 +565,7 @@ type Fs struct {
 	fileFields       googleapi.Field    // fields to fetch file info with
 	m                configmap.Mapper
 	// DriveMod: service account
-	ServiceAccountFiles map[string]int
+	ServiceAccountBox   *ServiceAccountBox
 	serviceAccountMutex sync.Mutex
 	FileObj             *fs.Object
 	FileName            string
@@ -597,6 +598,158 @@ type Object struct {
 	url        string // Download URL of this object
 	md5sum     string // md5sum of the object
 	v2Download bool   // generate v2 download link ondemand
+}
+
+// ------------------------------------------------------------
+// DriveMod
+
+// ServiceAccountBox ...
+type ServiceAccountBox struct {
+	Projects             map[string]map[string]string
+	Weights              map[string]int
+	CurrentProjectKey    string
+	CurrentProjectWeight int
+}
+
+func newServiceAccountBox() *ServiceAccountBox {
+	b := &ServiceAccountBox{
+		Projects: make(map[string]map[string]string),
+		Weights:  make(map[string]int),
+	}
+	return b
+}
+
+// Load service account file from folder  (recursive)
+func (b *ServiceAccountBox) Load(opt *Options) (err error) {
+	root := opt.ServiceAccountFilePath
+	if len(root) > 0 {
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			fs.Debugf(nil, "Loading Service Account File(s) from %q", root)
+			err := filepath.Walk(root,
+				func(path string, f os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					if !f.IsDir() && filepath.Ext(path) == ".json" {
+						b.AddAccount(filepath.Dir(path), path)
+					}
+
+					return nil
+				})
+			if err != nil {
+				return errors.Wrap(err, "error loading service account from folder")
+			}
+		}
+	}
+
+	fs.Debugf(nil, "Loaded %d Service Account File(s) from %d Project(s)", b.Size(), b.ProjectSize())
+	return err
+}
+
+// ProjectSize ...
+func (b *ServiceAccountBox) ProjectSize() int {
+	return len(b.Projects)
+}
+
+// Size ...
+func (b *ServiceAccountBox) Size() (size int) {
+	for _, p := range b.Projects {
+		size = size + len(p)
+	}
+	return size
+}
+
+// IsEmpty ...
+func (b *ServiceAccountBox) IsEmpty() bool {
+	return b.Size() >= 0
+}
+
+// AddAccount ...
+func (b *ServiceAccountBox) AddAccount(projectKey string, path string) (err error) {
+	// Create project if not exists
+	if _, ok := b.Projects[projectKey]; !ok {
+		b.Projects[projectKey] = make(map[string]string)
+		b.Weights[projectKey] = 0
+	}
+	p := b.Projects[projectKey]
+
+	// Add service account file to project
+	p[path] = path
+	return
+}
+
+// GetProjectKey ...
+func (b *ServiceAccountBox) GetProjectKey(random bool) string {
+	projectKey := b.CurrentProjectKey
+
+	// Random
+	if random {
+		r := rand.Intn(len(b.Projects))
+		for k := range b.Projects {
+			if k == b.CurrentProjectKey {
+				continue
+			}
+
+			if r == 0 || projectKey == "" {
+				projectKey = k
+			}
+			r--
+		}
+		return projectKey
+	}
+
+	// Weight
+	m := b.Weights
+	n := map[int][]string{}
+	var a []int
+	for k, v := range m {
+		n[v] = append(n[v], k)
+	}
+	for k := range n {
+		a = append(a, k)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(a)))
+	for _, k := range a {
+		for _, s := range n[k] {
+			if projectKey == "" || s != projectKey {
+				projectKey = s
+			}
+		}
+	}
+
+	return projectKey
+}
+
+// GetAccount ...
+func (b *ServiceAccountBox) GetAccount(random bool, pop bool) (file string, err error) {
+	// Select project
+	projectKey := b.GetProjectKey(false)
+	project := b.Projects[projectKey]
+
+	b.Weights[projectKey]++
+	b.CurrentProjectKey = projectKey
+	b.CurrentProjectWeight = b.Weights[projectKey]
+
+	// Select file
+	r := rand.Intn(len(project))
+	for k := range project {
+		if r == 0 {
+			file = k
+		}
+		r--
+	}
+
+	if pop {
+		delete(project, file)
+
+		// Remove empty project
+		if len(project) == 0 {
+			delete(b.Projects, projectKey)
+			delete(b.Weights, projectKey)
+		}
+	}
+
+	return
 }
 
 // ------------------------------------------------------------
@@ -1018,10 +1171,11 @@ func createOAuthClient(opt *Options, name string, m configmap.Mapper) (*http.Cli
 
 	// DriveMod: try to find service account file if not set
 	if len(opt.ServiceAccountFile) == 0 {
-		if files, err := loadServiceAccountFiles(opt); err == nil {
-			if filePath, err := pickServiceAccountFile(files, true, false); err == nil {
-				opt.ServiceAccountFile = filePath
-				fs.Debugf(nil, "Assigned Service Account File to %s", filePath)
+		box := newServiceAccountBox()
+		if err := box.Load(opt); err == nil {
+			if file, err := box.GetAccount(true, false); err == nil {
+				opt.ServiceAccountFile = file
+				fs.Debugf(nil, "Assigned Service Account File to %s", file)
 			}
 		}
 	}
@@ -1199,6 +1353,8 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 		return nil, err
 	}
 
+	// DriveMod: ServiceAccountBox
+	f.ServiceAccountBox = newServiceAccountBox()
 	// DriveMod: confirm the object ID is file
 	if isFileID {
 		file, err := f.svc.Files.Get(opt.RootFolderID).Fields("name", "id", "size", "mimeType").SupportsAllDrives(true).Do()
@@ -2829,104 +2985,29 @@ func (f *Fs) shouldChangeSA() (bool, error) {
 	return false, nil
 }
 
-// DriveMod:: loadServiceAccountFiles load service account file from folder (recursive)
-func loadServiceAccountFiles(opt *Options) (map[string]int, error) {
-	list := make(map[string]int)
-
-	// Read service account file from folder
-	saFolder := opt.ServiceAccountFilePath
-	if len(saFolder) > 0 {
-		fs.Debugf(nil, "Loading Service Account File(s) from %q", saFolder)
-		files, err := ioutil.ReadDir(saFolder)
-		if err != nil {
-			return list, errors.Wrap(err, "error loading service account from folder")
-		}
-
-		// Add valid service account file
-		for i, file := range files {
-			filePath := path.Join(saFolder, file.Name())
-			if filePath == opt.ServiceAccountFile || path.Ext(filePath) != ".json" {
-				continue
-			}
-			list[filePath] = i
-		}
-	}
-
-	fs.Debugf(nil, "Loaded %d Service Account File(s)", len(list))
-	return list, nil
-}
-func (f *Fs) loadServiceAccountFiles() (map[string]int, error) {
-	opt := &f.opt
-	return loadServiceAccountFiles(opt)
-}
-
-// DriveMod:: pickServiceAccountFile
-func pickServiceAccountFile(list map[string]int, random bool, pop bool) (filePath string, err error) {
-	if len(list) == 0 {
-		err = errors.Errorf("no available service account file")
-		return
-	}
-
-	// Select by random
-	r := rand.Intn(len(list))
-	for k := range list {
-		if r == 0 {
-			filePath = k
-		}
-		r--
-	}
-	if pop {
-		delete(list, filePath)
-	}
-	return
-}
-func (f *Fs) pickServiceAccountFile(random bool, pop bool) (filePath string, err error) {
-	// opt := &f.opt
-	list := make(map[string]int)
-
-	// Load if not initialized
-	if f.ServiceAccountFiles == nil {
-		list, err = f.loadServiceAccountFiles()
-		if err != nil {
-			return
-		}
-		f.ServiceAccountFiles = list
-	}
-
-	return pickServiceAccountFile(f.ServiceAccountFiles, random, pop)
-}
-
 // DriveMod: changeServiceAccount change service account from list
 // Read json from folder if empty.
 func (f *Fs) changeServiceAccount(reason string) error {
-	// opt := &f.opt
+	opt := &f.opt
 
 	// Load
-	if len(f.ServiceAccountFiles) == 0 {
-		list, err := f.loadServiceAccountFiles()
+	if f.ServiceAccountBox.Size() == 0 {
+		err := f.ServiceAccountBox.Load(opt)
 		if err != nil {
 			return err
 		}
-		f.ServiceAccountFiles = list
 	}
-
-	if len(f.ServiceAccountFiles) == 0 {
+	if f.ServiceAccountBox.Size() == 0 {
 		return errors.Errorf("no available service account file")
 	}
 
 	// Pop service account
-	filePath, err := f.pickServiceAccountFile(true, true)
+	file, err := f.ServiceAccountBox.GetAccount(true, true)
 	if err == nil {
-		err = f.changeServiceAccountFile(filePath)
+		err = f.changeServiceAccountFile(file)
 	}
 
-	fs.Infof(nil, "Service Account Changed (remain: %d, reason: %s)", len(f.ServiceAccountFiles), reason)
-
-	// Create new pacer
-	// if err == nil {
-	// 	f.pacer = newPacer(opt)
-	// }
-
+	fs.Infof(nil, "Service Account Changed (remain: %d, reason: %s, project (%d): %s)", f.ServiceAccountBox.Size(), reason, f.ServiceAccountBox.CurrentProjectWeight, f.ServiceAccountBox.CurrentProjectKey)
 	return err
 }
 
@@ -2957,6 +3038,7 @@ func (f *Fs) changeServiceAccountFile(file string) (err error) {
 		return errors.Wrap(err, "drive: failed when making oauth client")
 	}
 
+	// DriveMod: Reset pacer
 	f.pacer = newPacer(&f.opt)
 
 	f.client = oAuthClient
