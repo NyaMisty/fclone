@@ -797,7 +797,7 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 					if e := f.changeServiceAccount(reason); e != nil {
 						fs.Errorf(f, "Change service account error: %v", err)
 					}
-					f.serviceAccountMutex.Unlock()
+					f.ServiceAccountBox.Mutex.Unlock()
 					return true, err
 				}
 				if f.opt.StopOnUploadLimit && gerr.Errors[0].Message == "User rate limit exceeded." {
