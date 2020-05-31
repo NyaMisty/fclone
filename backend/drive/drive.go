@@ -22,6 +22,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1244,6 +1245,28 @@ func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
 	return
 }
 
+func parseRootID(s string) (rootID string, err error) {
+	rootID = s
+
+	if strings.HasPrefix(s, "http") {
+		// folders - https://drive.google.com/drive/u/0/folders/
+		// file - https://drive.google.com/file/d/
+		re := regexp.MustCompile(`\/(folders|files|file\/d)\/([A-Za-z0-9_-]+)\/?`)
+		if m := re.FindStringSubmatch(s); m != nil {
+			rootID = m[2]
+			return
+		}
+
+		// id - https://drive.google.com/open?id=
+		re = regexp.MustCompile(`.+id=([A-Za-z0-9_-]+).?`)
+		if m := re.FindStringSubmatch(s); m != nil {
+			rootID = m[1]
+			return
+		}
+	}
+	return
+}
+
 // NewFs constructs an Fs from the path, container:path
 func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	ctx := context.Background()
@@ -1253,20 +1276,25 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 
 	// DriveMod: parse object id from path remote:{ID}
 	isFileID := false
-	if path != "" && path[0:1] == "{" {
+	if path != "" && path[0:1] == "{" && strings.Contains(path, "}") {
 		idIndex := strings.Index(path, "}")
 		if idIndex > 0 {
-			rootID := path[1:idIndex]
-			name += rootID
-			//opt.ServerSideAcrossConfigs = true
-			if len(rootID) == 33 || len(rootID) == 28 {
-				isFileID = true
-				opt.RootFolderID = rootID
+			rootID, err := parseRootID(path[1:idIndex])
+			if err != nil {
+
 			} else {
-				opt.RootFolderID = rootID
-				opt.TeamDriveID = rootID
+				name += rootID
+				fs.Debugf(nil, "Root ID detected: %s", rootID)
+				//opt.ServerSideAcrossConfigs = true
+				if len(rootID) == 33 || len(rootID) == 28 {
+					isFileID = true
+					opt.RootFolderID = rootID
+				} else {
+					opt.RootFolderID = rootID
+					opt.TeamDriveID = rootID
+				}
+				path = path[idIndex+1:]
 			}
-			path = path[idIndex+1:]
 		}
 	}
 
