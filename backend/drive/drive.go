@@ -565,10 +565,9 @@ type Fs struct {
 	fileFields       googleapi.Field    // fields to fetch file info with
 	m                configmap.Mapper
 	// DriveMod: service account
-	ServiceAccountBox   *ServiceAccountBox
-	serviceAccountMutex sync.Mutex
-	FileObj             *fs.Object
-	FileName            string
+	ServiceAccountBox *ServiceAccountBox
+	FileObj           *fs.Object
+	FileName          string
 }
 
 type baseObject struct {
@@ -609,6 +608,7 @@ type ServiceAccountBox struct {
 	Weights              map[string]int
 	CurrentProjectKey    string
 	CurrentProjectWeight int
+	Mutex                sync.Mutex
 }
 
 func newServiceAccountBox() *ServiceAccountBox {
@@ -793,7 +793,7 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" {
 				// DriveMod: change service account
 				if ok, _ := f.shouldChangeSA(); ok {
-					f.serviceAccountMutex.Lock()
+					f.ServiceAccountBox.Mutex.Lock()
 					if e := f.changeServiceAccount(reason); e != nil {
 						fs.Errorf(f, "Change service account error: %v", err)
 					}
@@ -3037,9 +3037,6 @@ func (f *Fs) changeServiceAccountFile(file string) (err error) {
 	if err != nil {
 		return errors.Wrap(err, "drive: failed when making oauth client")
 	}
-
-	// DriveMod: Reset pacer
-	f.pacer = newPacer(&f.opt)
 
 	f.client = oAuthClient
 	f.svc, err = drive.New(f.client)
