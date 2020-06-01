@@ -15,11 +15,14 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -230,6 +233,9 @@ in with the ID of the root folder.
 		}, {
 			Name: "service_account_file",
 			Help: "Service Account Credentials JSON file path \nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
+		}, {
+			Name: "service_account_file_path",
+			Help: "Service Account Credentials JSON folder path.",
 		}, {
 			Name:     "service_account_credentials",
 			Help:     "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -512,6 +518,7 @@ type Options struct {
 	Scope                     string               `config:"scope"`
 	RootFolderID              string               `config:"root_folder_id"`
 	ServiceAccountFile        string               `config:"service_account_file"`
+	ServiceAccountFilePath    string               `config:"service_account_file_path"`
 	ServiceAccountCredentials string               `config:"service_account_credentials"`
 	TeamDriveID               string               `config:"team_drive"`
 	AuthOwnerOnly             bool                 `config:"auth_owner_only"`
@@ -564,6 +571,10 @@ type Fs struct {
 	grouping         int32               // number of IDs to search at once in ListR - read with atomic
 	listRmu          *sync.Mutex         // protects listRempties
 	listRempties     map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
+	// DriveMod: service account
+	ServiceAccountBox *ServiceAccountBox
+	FileObj           *fs.Object
+	FileName          string
 }
 
 type baseObject struct {
@@ -593,6 +604,170 @@ type Object struct {
 	url        string // Download URL of this object
 	md5sum     string // md5sum of the object
 	v2Download bool   // generate v2 download link ondemand
+}
+
+// ------------------------------------------------------------
+// DriveMod
+
+// ServiceAccountBox ...
+type ServiceAccountBox struct {
+	Projects             map[string]map[string]string
+	Weights              map[string]int
+	CurrentProjectKey    string
+	CurrentProjectWeight int
+	Mutex                sync.Mutex
+}
+
+func newServiceAccountBox() *ServiceAccountBox {
+	b := &ServiceAccountBox{
+		Projects: make(map[string]map[string]string),
+		Weights:  make(map[string]int),
+	}
+	return b
+}
+
+// Load service account file from folder  (recursive)
+func (b *ServiceAccountBox) Load(opt *Options) (err error) {
+	root := opt.ServiceAccountFilePath
+	if len(root) > 0 {
+		fs.Debugf(nil, "Loading Service Account File(s) from %q", root)
+		if _, err := os.Stat(root); !os.IsNotExist(err) {
+			err := filepath.Walk(root,
+				func(path string, f os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					if !f.IsDir() && filepath.Ext(path) == ".json" {
+						b.AddAccount(filepath.Dir(path), path)
+					}
+
+					return nil
+				})
+			if err != nil {
+				return errors.Wrap(err, "error loading service account from folder")
+			}
+		}
+		fs.Debugf(nil, "Loaded %d Service Account File(s) from %d Project(s)", b.Size(), b.ProjectSize())
+
+	}
+
+	return err
+}
+
+// ProjectSize ...
+func (b *ServiceAccountBox) ProjectSize() int {
+	return len(b.Projects)
+}
+
+// Size ...
+func (b *ServiceAccountBox) Size() (size int) {
+	for _, p := range b.Projects {
+		size = size + len(p)
+	}
+	return size
+}
+
+// IsEmpty ...
+func (b *ServiceAccountBox) IsEmpty() bool {
+	return b.Size() >= 0
+}
+
+// AddAccount ...
+func (b *ServiceAccountBox) AddAccount(projectKey string, path string) (err error) {
+	// Create project if not exists
+	if _, ok := b.Projects[projectKey]; !ok {
+		b.Projects[projectKey] = make(map[string]string)
+		b.Weights[projectKey] = 0
+	}
+	p := b.Projects[projectKey]
+
+	// Add service account file to project
+	p[path] = path
+	return
+}
+
+// GetProjectKey ...
+func (b *ServiceAccountBox) GetProjectKey(random bool) string {
+	projectKey := b.CurrentProjectKey
+
+	// Random
+	if random {
+		r := rand.Intn(len(b.Projects))
+		for k := range b.Projects {
+			if k == b.CurrentProjectKey {
+				continue
+			}
+
+			if r == 0 || projectKey == "" {
+				projectKey = k
+			}
+			r--
+		}
+		return projectKey
+	}
+
+	// Weight
+	m := b.Weights
+	n := map[int][]string{}
+	var a []int
+	for k, v := range m {
+		n[v] = append(n[v], k)
+	}
+	for k := range n {
+		a = append(a, k)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(a)))
+	for _, k := range a {
+		for _, s := range n[k] {
+			if projectKey == "" || s != projectKey {
+				projectKey = s
+			}
+		}
+	}
+
+	return projectKey
+}
+
+// GetAccount ...
+func (b *ServiceAccountBox) GetAccount(random bool, pop bool) (file string, err error) {
+	if len(b.Projects) == 0 {
+		err = errors.Errorf("no available projects")
+		return
+	}
+
+	// Select project
+	projectKey := b.GetProjectKey(false)
+	project := b.Projects[projectKey]
+
+	b.Weights[projectKey]++
+	b.CurrentProjectKey = projectKey
+	b.CurrentProjectWeight = b.Weights[projectKey]
+
+	if len(project) == 0 {
+		err = errors.Errorf("no available accounts")
+		return
+	}
+
+	// Select file
+	r := rand.Intn(len(project))
+	for k := range project {
+		if r == 0 {
+			file = k
+		}
+		r--
+	}
+
+	if pop {
+		delete(project, file)
+
+		// Remove empty project
+		if len(project) == 0 {
+			delete(b.Projects, projectKey)
+			delete(b.Weights, projectKey)
+		}
+	}
+
+	return
 }
 
 // ------------------------------------------------------------
@@ -634,6 +809,15 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 		if len(gerr.Errors) > 0 {
 			reason := gerr.Errors[0].Reason
 			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" {
+				// DriveMod: change service account
+				if ok, _ := f.shouldChangeSA(); ok {
+					f.ServiceAccountBox.Mutex.Lock()
+					if e := f.changeServiceAccount(reason); e != nil {
+						fs.Errorf(f, "Change service account error: %v", err)
+					}
+					f.ServiceAccountBox.Mutex.Unlock()
+					return true, err
+				}
 				if f.opt.StopOnUploadLimit && gerr.Errors[0].Message == "User rate limit exceeded." {
 					fs.Errorf(f, "Received upload limit error: %v", err)
 					return false, fserrors.FatalError(err)
@@ -1003,6 +1187,17 @@ func createOAuthClient(opt *Options, name string, m configmap.Mapper) (*http.Cli
 	var oAuthClient *http.Client
 	var err error
 
+	// DriveMod: try to find service account file if not set
+	if len(opt.ServiceAccountFile) == 0 {
+		box := newServiceAccountBox()
+		if err := box.Load(opt); err == nil {
+			if file, err := box.GetAccount(true, false); err == nil {
+				opt.ServiceAccountFile = file
+				fs.Debugf(nil, "Assigned Service Account File to %s", file)
+			}
+		}
+	}
+
 	// try loading service account credentials from env variable, then from a file
 	if len(opt.ServiceAccountCredentials) == 0 && opt.ServiceAccountFile != "" {
 		loadedCreds, err := ioutil.ReadFile(os.ExpandEnv(opt.ServiceAccountFile))
@@ -1056,12 +1251,59 @@ func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
 	return
 }
 
+func parseRootID(s string) (rootID string, err error) {
+	rootID = s
+
+	if strings.HasPrefix(s, "http") {
+		// folders - https://drive.google.com/drive/u/0/folders/
+		// file - https://drive.google.com/file/d/
+		re := regexp.MustCompile(`\/(folders|files|file\/d)\/([A-Za-z0-9_-]+)\/?`)
+		if m := re.FindStringSubmatch(s); m != nil {
+			rootID = m[2]
+			return
+		}
+
+		// id - https://drive.google.com/open?id=
+		re = regexp.MustCompile(`.+id=([A-Za-z0-9_-]+).?`)
+		if m := re.FindStringSubmatch(s); m != nil {
+			rootID = m[1]
+			return
+		}
+	}
+	return
+}
+
 // NewFs constructs an Fs from the path, container:path
 func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	ctx := context.Background()
 	// Parse config into Options struct
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
+
+	// DriveMod: parse object id from path remote:{ID}
+	isFileID := false
+	if path != "" && path[0:1] == "{" && strings.Contains(path, "}") {
+		idIndex := strings.Index(path, "}")
+		if idIndex > 0 {
+			rootID, err := parseRootID(path[1:idIndex])
+			if err != nil {
+
+			} else {
+				name += rootID
+				fs.Debugf(nil, "Root ID detected: %s", rootID)
+				//opt.ServerSideAcrossConfigs = true
+				if len(rootID) == 33 || len(rootID) == 28 {
+					isFileID = true
+					opt.RootFolderID = rootID
+				} else {
+					opt.RootFolderID = rootID
+					opt.TeamDriveID = rootID
+				}
+				path = path[idIndex+1:]
+			}
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -1157,6 +1399,30 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	_, f.importMimeTypes, err = parseExtensions(opt.ImportExtensions)
 	if err != nil {
 		return nil, err
+	}
+
+	// DriveMod: ServiceAccountBox
+	f.ServiceAccountBox = newServiceAccountBox()
+	// DriveMod: confirm the object ID is file
+	if isFileID {
+		file, err := f.svc.Files.Get(opt.RootFolderID).Fields("name", "id", "size", "mimeType").SupportsAllDrives(true).Do()
+		if err == nil {
+			//fmt.Println("file.MimeType", file.MimeType)
+			if "application/vnd.google-apps.folder" != file.MimeType && file.MimeType != "" {
+				tempF := *f
+				newRoot := ""
+				tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
+				tempF.root = newRoot
+				f.dirCache = tempF.dirCache
+				f.root = tempF.root
+
+				extension, exportName, exportMimeType, isDocument := f.findExportFormat(file)
+				obj, _ := f.newObjectWithExportInfo(file.Name, file, extension, exportName, exportMimeType, isDocument)
+				f.root = "isFile:" + file.Name
+				f.FileObj = &obj
+				return f, fs.ErrorIsFile
+			}
+		}
 	}
 
 	// Find the current root
@@ -1365,6 +1631,11 @@ func (f *Fs) newObjectWithExportInfo(
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error fs.ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	// DriveMod
+	if f.FileObj != nil {
+		return *f.FileObj, nil
+	}
+
 	info, extension, exportName, exportMimeType, isDocument, err := f.getRemoteInfoWithExport(ctx, remote)
 	if err != nil {
 		return nil, err
@@ -2803,6 +3074,40 @@ func (f *Fs) changeChunkSize(chunkSizeString string) (err error) {
 	return err
 }
 
+// DriveMod: shouldChangeSA determines whether multiple service accounts existed
+func (f *Fs) shouldChangeSA() (bool, error) {
+	if len(f.opt.ServiceAccountFilePath) > 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// DriveMod: changeServiceAccount change service account from list
+// Read json from folder if empty.
+func (f *Fs) changeServiceAccount(reason string) error {
+	opt := &f.opt
+
+	// Load
+	if f.ServiceAccountBox.Size() == 0 {
+		err := f.ServiceAccountBox.Load(opt)
+		if err != nil {
+			return err
+		}
+	}
+	if f.ServiceAccountBox.Size() == 0 {
+		return errors.Errorf("no available service account file")
+	}
+
+	// Pop service account
+	file, err := f.ServiceAccountBox.GetAccount(true, true)
+	if err == nil {
+		err = f.changeServiceAccountFile(file)
+	}
+
+	fs.Infof(nil, "Service Account Changed (remain: %d, reason: %s, project (%d): %s)", f.ServiceAccountBox.Size(), reason, f.ServiceAccountBox.CurrentProjectWeight, f.ServiceAccountBox.CurrentProjectKey)
+	return err
+}
+
 func (f *Fs) changeServiceAccountFile(file string) (err error) {
 	fs.Debugf(nil, "Changing Service Account File from %s to %s", f.opt.ServiceAccountFile, file)
 	if file == f.opt.ServiceAccountFile {
@@ -2829,6 +3134,7 @@ func (f *Fs) changeServiceAccountFile(file string) (err error) {
 	if err != nil {
 		return errors.Wrap(err, "drive: failed when making oauth client")
 	}
+
 	f.client = oAuthClient
 	f.svc, err = drive.New(f.client)
 	if err != nil {
