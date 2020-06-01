@@ -336,8 +336,9 @@ func (s *StatsInfo) String() string {
 			_, _ = fmt.Fprintf(buf, "Renamed:       %10d\n", s.renames)
 		}
 		if s.transfers != 0 || totalTransfer != 0 {
-			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s\n",
-				s.transfers, totalTransfer, percent(s.transfers, totalTransfer))
+			// Mod: Add number of files
+			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s, %.2f Files/s\n",
+				s.transfers, totalTransfer, percent(s.transfers, totalTransfer), float64(s.transfers)/dtSeconds)
 		}
 		_, _ = fmt.Fprintf(buf, "Elapsed time:  %10ss\n", strings.TrimRight(dt.Truncate(time.Minute).String(), "0s")+fmt.Sprintf("%.1f", dtSecondsOnly.Seconds()))
 	}
