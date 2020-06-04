@@ -812,7 +812,7 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 				// DriveMod: change service account
 				if ok, _ := f.shouldChangeSA(); ok {
 					f.ServiceAccountBox.Mutex.Lock()
-					if e := f.changeServiceAccount(reason); e != nil {
+					if e := f.changeServiceAccount(reason, true); e != nil {
 						fs.Errorf(f, "Change service account error: %v", err)
 					}
 					f.ServiceAccountBox.Mutex.Unlock()
@@ -2594,6 +2594,14 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	})
 	if err != nil {
 		return nil, err
+	} else {
+		// DriveMod
+		if ok, _ := f.shouldChangeSA(); ok {
+			f.ServiceAccountBox.Mutex.Lock()
+			if e := f.changeServiceAccount("Chane SA after move", false); e != nil {
+				fs.Errorf(f, "Change service account error: %v", err)
+			}
+		}
 	}
 	newObject, err := f.newObjectWithInfo(remote, info)
 	if err != nil {
@@ -2753,6 +2761,14 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	})
 	if err != nil {
 		return nil, err
+	} else {
+		// DriveMod
+		if ok, _ := f.shouldChangeSA(); ok {
+			f.ServiceAccountBox.Mutex.Lock()
+			if e := f.changeServiceAccount("Chane SA after move", false); e != nil {
+				fs.Errorf(f, "Change service account error: %v", err)
+			}
+		}
 	}
 
 	return f.newObjectWithInfo(remote, info)
@@ -3084,7 +3100,7 @@ func (f *Fs) shouldChangeSA() (bool, error) {
 
 // DriveMod: changeServiceAccount change service account from list
 // Read json from folder if empty.
-func (f *Fs) changeServiceAccount(reason string) error {
+func (f *Fs) changeServiceAccount(reason string, pop bool) error {
 	opt := &f.opt
 
 	// Load
@@ -3099,7 +3115,7 @@ func (f *Fs) changeServiceAccount(reason string) error {
 	}
 
 	// Pop service account
-	file, err := f.ServiceAccountBox.GetAccount(true, true)
+	file, err := f.ServiceAccountBox.GetAccount(true, pop)
 	if err == nil {
 		err = f.changeServiceAccountFile(file)
 	}
