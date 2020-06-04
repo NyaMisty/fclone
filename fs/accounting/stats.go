@@ -278,7 +278,13 @@ func (s *StatsInfo) String() string {
 		buf          = &bytes.Buffer{}
 		xfrchkString = ""
 		dateString   = ""
+		fpsString    = ""
 	)
+
+	// DriveMod: Add files/second
+	if dtSeconds > 0 {
+		fpsString = fmt.Sprintf(", %.2f Files/s", float64(s.transfers)/dtSeconds)
+	}
 
 	if !fs.Config.StatsOneLine {
 		_, _ = fmt.Fprintf(buf, "\nTransferred:   	")
@@ -299,7 +305,8 @@ func (s *StatsInfo) String() string {
 		}
 	}
 
-	_, _ = fmt.Fprintf(buf, "%s%10s / %s, %s, %s, ETA %s%s\n",
+	// DriveMod: Add files/second
+	_, _ = fmt.Fprintf(buf, "%s%10s / %s, %s, %s, ETA %s%s%s\n",
 		dateString,
 		fs.SizeSuffix(s.bytes),
 		fs.SizeSuffix(totalSize).Unit("Bytes"),
@@ -307,6 +314,7 @@ func (s *StatsInfo) String() string {
 		fs.SizeSuffix(displaySpeed).Unit(strings.Title(fs.Config.DataRateUnit)+"/s"),
 		etaString(currentSize, totalSize, speed),
 		xfrchkString,
+		fpsString,
 	)
 
 	if !fs.Config.StatsOneLine {
@@ -339,8 +347,8 @@ func (s *StatsInfo) String() string {
 			// _, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s\n",
 			// s.transfers, totalTransfer, percent(s.transfers, totalTransfer))
 			// DriveMod: Add number of files
-			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s, %.2f Files/s\n",
-				s.transfers, totalTransfer, percent(s.transfers, totalTransfer), float64(s.transfers)/dtSeconds)
+			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s%s\n",
+				s.transfers, totalTransfer, percent(s.transfers, totalTransfer), fpsString)
 		}
 		_, _ = fmt.Fprintf(buf, "Elapsed time:  %10ss\n", strings.TrimRight(dt.Truncate(time.Minute).String(), "0s")+fmt.Sprintf("%.1f", dtSecondsOnly.Seconds()))
 	}
