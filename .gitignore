@@ -10,3 +10,5 @@ rclone.iml
 *.log
 *.iml
 rclone.exe
+
+.vscode/launch.json
