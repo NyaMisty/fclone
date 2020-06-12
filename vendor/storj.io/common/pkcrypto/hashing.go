@@ -1,12 +1,14 @@
 // Copyright (C) 2019 Storj Labs, Inc.
 // See LICENSE for copying information.
 
+// +build !stdsha256
+
 package pkcrypto
 
 import (
 	"hash"
 
-	sha256 "github.com/minio/sha256-simd"
+	"github.com/minio/sha256-simd"
 )
 
 // NewHash returns default hash in storj.

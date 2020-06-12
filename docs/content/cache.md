@@ -1,7 +1,6 @@
 ---
 title: "Cache"
 description: "Rclone docs for cache remote"
-date: "2017-09-03"
 ---
 
 {{< icon "fa fa-archive" >}} Cache (BETA)
@@ -343,6 +342,8 @@ The username of the Plex user
 #### --cache-plex-password
 
 The password of the Plex user
+
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
 - Config:      plex_password
 - Env Var:     RCLONE_CACHE_PLEX_PASSWORD
