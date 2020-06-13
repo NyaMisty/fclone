@@ -1,7 +1,6 @@
 ---
 title: "FTP"
 description: "Rclone docs for FTP backend"
-date: "2017-01-01"
 ---
 
 {{< icon "fa fa-file" >}} FTP
@@ -92,7 +91,7 @@ List the contents of a directory
 Sync `/home/local/directory` to the remote directory, deleting any
 excess files in the directory.
 
-    rclone sync /home/local/directory remote:directory
+    rclone sync -i /home/local/directory remote:directory
 
 ### Modified time ###
 
@@ -172,6 +171,8 @@ FTP port, leave blank to use default (21)
 #### --ftp-pass
 
 FTP password
+
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
 - Config:      pass
 - Env Var:     RCLONE_FTP_PASS

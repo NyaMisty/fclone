@@ -1,7 +1,6 @@
 ---
 title: "Mailru"
 description: "Mail.ru Cloud"
-date: "2019-08-04"
 ---
 
 {{< icon "fas fa-at" >}} Mail.ru Cloud
@@ -107,7 +106,7 @@ List the contents of a directory
 Sync `/home/local/directory` to the remote path, deleting any
 excess files in the path.
 
-    rclone sync /home/local/directory remote:directory
+    rclone sync -i /home/local/directory remote:directory
 
 ### Modified time ###
 
@@ -181,6 +180,8 @@ User name (usually email)
 #### --mailru-pass
 
 Password
+
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
 - Config:      pass
 - Env Var:     RCLONE_MAILRU_PASS

@@ -59,6 +59,7 @@ import (
 	"github.com/rclone/rclone/lib/pool"
 	"github.com/rclone/rclone/lib/readers"
 	"github.com/rclone/rclone/lib/rest"
+	"github.com/rclone/rclone/lib/structs"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -774,6 +775,21 @@ larger files then you will need to increase chunk_size.`,
 			Default:  minChunkSize,
 			Advanced: true,
 		}, {
+			Name: "max_upload_parts",
+			Help: `Maximum number of parts in a multipart upload.
+
+This option defines the maximum number of multipart chunks to use
+when doing a multipart upload.
+
+This can be useful if a service does not support the AWS S3
+specification of 10,000 chunks.
+
+Rclone will automatically increase the chunk size when uploading a
+large file of a known size to stay below this number of chunks limit.
+`,
+			Default:  maxUploadParts,
+			Advanced: true,
+		}, {
 			Name: "copy_cutoff",
 			Help: `Cutoff for switching to multipart copy
 
@@ -931,6 +947,7 @@ type Options struct {
 	UploadCutoff          fs.SizeSuffix        `config:"upload_cutoff"`
 	CopyCutoff            fs.SizeSuffix        `config:"copy_cutoff"`
 	ChunkSize             fs.SizeSuffix        `config:"chunk_size"`
+	MaxUploadParts        int64                `config:"max_upload_parts"`
 	DisableChecksum       bool                 `config:"disable_checksum"`
 	SessionToken          string               `config:"session_token"`
 	UploadConcurrency     int                  `config:"upload_concurrency"`
@@ -1959,6 +1976,20 @@ func (f *Fs) getMemoryPool(size int64) *pool.Pool {
 	)
 }
 
+// PublicLink generates a public link to the remote path (usually readable by anyone)
+func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (link string, err error) {
+	if _, err := f.NewObject(ctx, remote); err != nil {
+		return "", err
+	}
+	bucket, bucketPath := f.split(remote)
+	httpReq, _ := f.c.GetObjectRequest(&s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &bucketPath,
+	})
+
+	return httpReq.Presign(time.Duration(expire))
+}
+
 // ------------------------------------------------------------
 
 // Fs returns the parent Fs
@@ -2033,11 +2064,17 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 	if err != nil {
 		if awsErr, ok := err.(awserr.RequestFailure); ok {
 			if awsErr.StatusCode() == http.StatusNotFound {
+				// NotFound indicates bucket was OK
+				// NoSuchBucket would be returned if bucket was bad
+				if awsErr.Code() == "NotFound" {
+					o.fs.cache.MarkOK(bucket)
+				}
 				return fs.ErrorObjectNotFound
 			}
 		}
 		return err
 	}
+	o.fs.cache.MarkOK(bucket)
 	var size int64
 	// Ignore missing Content-Length assuming it is 0
 	// Some versions of ceph do this due their apache proxies
@@ -2177,6 +2214,13 @@ func (o *Object) uploadMultipart(ctx context.Context, req *s3.PutObjectInput, si
 	}
 	tokens := pacer.NewTokenDispenser(concurrency)
 
+	uploadParts := f.opt.MaxUploadParts
+	if uploadParts < 1 {
+		uploadParts = 1
+	} else if uploadParts > maxUploadParts {
+		uploadParts = maxUploadParts
+	}
+
 	// calculate size of parts
 	partSize := int(f.opt.ChunkSize)
 
@@ -2186,31 +2230,24 @@ func (o *Object) uploadMultipart(ctx context.Context, req *s3.PutObjectInput, si
 	if size == -1 {
 		warnStreamUpload.Do(func() {
 			fs.Logf(f, "Streaming uploads using chunk size %v will have maximum file size of %v",
-				f.opt.ChunkSize, fs.SizeSuffix(partSize*maxUploadParts))
+				f.opt.ChunkSize, fs.SizeSuffix(int64(partSize)*uploadParts))
 		})
 	} else {
 		// Adjust partSize until the number of parts is small enough.
-		if size/int64(partSize) >= maxUploadParts {
+		if size/int64(partSize) >= uploadParts {
 			// Calculate partition size rounded up to the nearest MB
-			partSize = int((((size / maxUploadParts) >> 20) + 1) << 20)
+			partSize = int((((size / uploadParts) >> 20) + 1) << 20)
 		}
 	}
 
 	memPool := f.getMemoryPool(int64(partSize))
 
+	var mReq s3.CreateMultipartUploadInput
+	structs.SetFrom(&mReq, req)
 	var cout *s3.CreateMultipartUploadOutput
 	err = f.pacer.Call(func() (bool, error) {
 		var err error
-		cout, err = f.c.CreateMultipartUploadWithContext(ctx, &s3.CreateMultipartUploadInput{
-			Bucket:               req.Bucket,
-			ACL:                  req.ACL,
-			Key:                  req.Key,
-			ContentType:          req.ContentType,
-			Metadata:             req.Metadata,
-			ServerSideEncryption: req.ServerSideEncryption,
-			SSEKMSKeyId:          req.SSEKMSKeyId,
-			StorageClass:         req.StorageClass,
-		})
+		cout, err = f.c.CreateMultipartUploadWithContext(ctx, &mReq)
 		return f.shouldRetry(err)
 	})
 	if err != nil {
@@ -2423,6 +2460,35 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if o.fs.opt.StorageClass != "" {
 		req.StorageClass = &o.fs.opt.StorageClass
 	}
+	// Apply upload options
+	for _, option := range options {
+		key, value := option.Header()
+		lowerKey := strings.ToLower(key)
+		switch lowerKey {
+		case "":
+			// ignore
+		case "cache-control":
+			req.CacheControl = aws.String(value)
+		case "content-disposition":
+			req.ContentDisposition = aws.String(value)
+		case "content-encoding":
+			req.ContentEncoding = aws.String(value)
+		case "content-language":
+			req.ContentLanguage = aws.String(value)
+		case "content-type":
+			req.ContentType = aws.String(value)
+		case "x-amz-tagging":
+			req.Tagging = aws.String(value)
+		default:
+			const amzMetaPrefix = "x-amz-meta-"
+			if strings.HasPrefix(lowerKey, amzMetaPrefix) {
+				metaKey := lowerKey[len(amzMetaPrefix):]
+				req.Metadata[metaKey] = aws.String(value)
+			} else {
+				fs.Errorf(o, "Don't know how to set key %q on upload", key)
+			}
+		}
+	}
 
 	if multipart {
 		err = o.uploadMultipart(ctx, &req, size, in)
@@ -2462,18 +2528,6 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		// set the headers we signed and the length
 		httpReq.Header = headers
 		httpReq.ContentLength = size
-
-		for _, option := range options {
-			switch option.(type) {
-			case *fs.HTTPOption:
-				key, value := option.Header()
-				httpReq.Header.Add(key, value)
-			default:
-				if option.Mandatory() {
-					fs.Logf(o, "Unsupported mandatory option: %v", option)
-				}
-			}
-		}
 
 		err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 			resp, err := o.fs.srv.Do(httpReq)

@@ -1,7 +1,6 @@
 ---
 title: "Microsoft Azure Blob Storage"
 description: "Rclone docs for Microsoft Azure Blob Storage"
-date: "2017-07-30"
 ---
 
 {{< icon "fab fa-windows" >}} Microsoft Azure Blob Storage
@@ -66,7 +65,7 @@ List the contents of a container
 Sync `/home/local/directory` to the remote container, deleting any excess
 files in the container.
 
-    rclone sync /home/local/directory remote:container
+    rclone sync -i /home/local/directory remote:container
 
 ### --fast-list ###
 

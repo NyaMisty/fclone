@@ -1,7 +1,6 @@
 ---
 title: "HTTP Remote"
 description: "Read only remote for HTTP servers"
-date: "2017-06-19"
 ---
 
 {{< icon "fa fa-globe" >}} HTTP
@@ -79,7 +78,7 @@ List the contents of a directory
 
 Sync the remote `directory` to `/home/local/directory`, deleting any excess files.
 
-    rclone sync remote:directory /home/local/directory
+    rclone sync -i remote:directory /home/local/directory
 
 ### Read only ###
 

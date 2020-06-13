@@ -1,7 +1,6 @@
 ---
 title: "Local Filesystem"
 description: "Rclone docs for the local filesystem"
-date: "2014-04-26"
 ---
 
 {{< icon "fas fa-hdd" >}} Local Filesystem
@@ -9,7 +8,7 @@ date: "2014-04-26"
 
 Local paths are specified as normal filesystem paths, eg `/path/to/wherever`, so
 
-    rclone sync /home/source /tmp/destination
+    rclone sync -i /home/source /tmp/destination
 
 Will sync `/home/source` to `/tmp/destination`
 

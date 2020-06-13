@@ -1,7 +1,6 @@
 ---
 title: "SFTP"
 description: "SFTP"
-date: "2017-02-01"
 ---
 
 {{< icon "fa fa-server" >}} SFTP
@@ -96,7 +95,7 @@ List the contents of a directory
 Sync `/home/local/directory` to the remote directory, deleting any
 excess files in the directory.
 
-    rclone sync /home/local/directory remote:directory
+    rclone sync -i /home/local/directory remote:directory
 
 ### SSH Authentication ###
 
@@ -193,6 +192,8 @@ SSH port, leave blank to use default (22)
 
 SSH password, leave blank to use ssh-agent.
 
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
+
 - Config:      pass
 - Env Var:     RCLONE_SFTP_PASS
 - Type:        string
@@ -222,6 +223,8 @@ The passphrase to decrypt the PEM-encoded private key file.
 
 Only PEM encrypted key files (old OpenSSH format) are supported. Encrypted keys
 in the new OpenSSH format can't be used.
+
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
 - Config:      key_file_pass
 - Env Var:     RCLONE_SFTP_KEY_FILE_PASS
@@ -303,11 +306,11 @@ different. This issue affects among others Synology NAS boxes.
 
 Shared folders can be found in directories representing volumes
 
-    rclone sync /home/local/directory remote:/directory --ssh-path-override /volume2/directory
+    rclone sync -i /home/local/directory remote:/directory --ssh-path-override /volume2/directory
 
 Home directory can be found in a shared folder called "home"
 
-    rclone sync /home/local/directory remote:/home/directory --ssh-path-override /volume1/homes/USER/directory
+    rclone sync -i /home/local/directory remote:/home/directory --ssh-path-override /volume1/homes/USER/directory
 
 - Config:      path_override
 - Env Var:     RCLONE_SFTP_PATH_OVERRIDE

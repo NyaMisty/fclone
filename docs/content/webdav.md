@@ -1,7 +1,6 @@
 ---
 title: "WebDAV"
 description: "Rclone docs for WebDAV"
-date: "2017-10-01"
 ---
 
 {{< icon "fa fa-globe" >}} WebDAV
@@ -152,6 +151,8 @@ User name
 #### --webdav-pass
 
 Password.
+
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
 - Config:      pass
 - Env Var:     RCLONE_WEBDAV_PASS

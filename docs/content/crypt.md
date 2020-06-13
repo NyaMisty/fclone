@@ -1,7 +1,6 @@
 ---
 title: "Crypt"
 description: "Encryption overlay remote"
-date: "2016-07-28"
 ---
 
 {{< icon "fa fa-lock" >}}Crypt
@@ -329,6 +328,8 @@ NB If filename_encryption is "off" then this option will do nothing.
 
 Password or pass phrase for encryption.
 
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
+
 - Config:      password
 - Env Var:     RCLONE_CRYPT_PASSWORD
 - Type:        string
@@ -338,6 +339,8 @@ Password or pass phrase for encryption.
 
 Password or pass phrase for salt. Optional but recommended.
 Should be different to the previous password.
+
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
 - Config:      password2
 - Env Var:     RCLONE_CRYPT_PASSWORD2
@@ -434,7 +437,7 @@ as `eremote:`.
 
 To sync the two remotes you would do
 
-    rclone sync remote:crypt remote2:crypt
+    rclone sync -i remote:crypt remote2:crypt
 
 And to check the integrity you would do
 

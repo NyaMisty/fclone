@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/lib/encoder"
+	"github.com/rclone/rclone/lib/env"
 	"github.com/rclone/rclone/lib/jwtutil"
 
 	"github.com/youmark/pkcs8"
@@ -112,7 +113,7 @@ func init() {
 			Advanced: true,
 		}, {
 			Name: "box_config_file",
-			Help: "Box App config.json location\nLeave blank normally.",
+			Help: "Box App config.json location\nLeave blank normally." + env.ShellExpandHelp,
 		}, {
 			Name:    "box_sub_type",
 			Default: "user",
@@ -153,6 +154,7 @@ func init() {
 }
 
 func refreshJWTToken(jsonFile string, boxSubType string, name string, m configmap.Mapper) error {
+	jsonFile = env.ShellExpand(jsonFile)
 	boxConfig, err := getBoxConfig(jsonFile)
 	if err != nil {
 		log.Fatalf("Failed to configure token: %v", err)
@@ -1022,7 +1024,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 }
 
 // PublicLink adds a "readable by anyone with link" permission on the given file or folder.
-func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
+func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (string, error) {
 	id, err := f.dirCache.FindDir(ctx, remote, false)
 	var opts rest.Opts
 	if err == nil {

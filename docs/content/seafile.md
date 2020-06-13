@@ -1,7 +1,6 @@
 ---
 title: "Seafile"
 description: "Seafile"
-date: "2020-05-19"
 ---
 
 {{< icon "fa fa-server" >}}Seafile
@@ -113,7 +112,7 @@ List the contents of a library
 Sync `/home/local/directory` to the remote library, deleting any
 excess files in the library.
 
-    rclone sync /home/local/directory seafile:library
+    rclone sync -i /home/local/directory seafile:library
 
 ### Configuration in library mode ###
 
@@ -209,7 +208,7 @@ List the contents of a directory
 Sync `/home/local/directory` to the remote library, deleting any
 excess files in the library.
 
-    rclone sync /home/local/directory seafile:
+    rclone sync -i /home/local/directory seafile:
 
 
 ### --fast-list ###
@@ -295,6 +294,8 @@ User name (usually email address)
 
 Password
 
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
+
 - Config:      pass
 - Env Var:     RCLONE_SEAFILE_PASS
 - Type:        string
@@ -321,6 +322,8 @@ Name of the library. Leave blank to access all non-encrypted libraries.
 #### --seafile-library-key
 
 Library password (for encrypted libraries only). Leave blank if you pass it through the command line.
+
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
 - Config:      library_key
 - Env Var:     RCLONE_SEAFILE_LIBRARY_KEY

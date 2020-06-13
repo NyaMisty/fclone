@@ -1,7 +1,6 @@
 ---
 title: "Mega"
 description: "Rclone docs for Mega"
-date: "2018-04-09"
 ---
 
 {{< icon "fa fa-archive" >}} Mega
@@ -168,6 +167,8 @@ User name
 #### --mega-pass
 
 Password.
+
+**NB** Input to this must be obscured - see [rclone obscure](/commands/rclone_obscure/).
 
 - Config:      pass
 - Env Var:     RCLONE_MEGA_PASS

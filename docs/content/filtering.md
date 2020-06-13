@@ -1,7 +1,6 @@
 ---
 title: "Filtering"
 description: "Filtering, includes and excludes"
-date: "2016-02-09"
 ---
 
 # Filtering, includes and excludes #
@@ -453,7 +452,7 @@ from the sync on the destination.
 
 If for example you did a sync from `A` to `B` without the `--min-size 50k` flag
 
-    rclone sync A: B:
+    rclone sync -i A: B:
 
 Then you repeated it like this with the `--delete-excluded`
 
@@ -511,7 +510,7 @@ Imagine, you have the following directory structure:
 
 You can exclude `dir3` from sync by running the following command:
 
-    rclone sync --exclude-if-present .ignore dir1 remote:backup
+    rclone sync -i --exclude-if-present .ignore dir1 remote:backup
 
 Currently only one filename is supported, i.e. `--exclude-if-present`
 should not be used multiple times.
