@@ -150,17 +150,6 @@ func (d Dialer) DialNodeURL(ctx context.Context, nodeURL storj.NodeURL) (_ *Conn
 	return d.dial(ctx, nodeURL.Address, d.TLSOptions.ClientTLSConfig(nodeURL.ID))
 }
 
-// DialNodeURL dials to the specified node url and asserts it has the given node id.
-func (d Dialer) DialNodeURL(ctx context.Context, nodeURL storj.NodeURL) (_ *Conn, err error) {
-	defer mon.Task()(&ctx, "node: "+nodeURL.ID.String()[0:8])(&err)
-
-	if d.TLSOptions == nil {
-		return nil, Error.New("tls options not set when required for this dial")
-	}
-
-	return d.dial(ctx, nodeURL.Address, d.TLSOptions.ClientTLSConfig(nodeURL.ID))
-}
-
 // DialAddressInsecureBestEffort is like DialAddressInsecure but tries to dial a node securely if
 // it can.
 //
