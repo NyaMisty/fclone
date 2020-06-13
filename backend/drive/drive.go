@@ -77,8 +77,10 @@ const (
 	listRInputBuffer = 1000 // size of input buffer when using ListR
 
 	// DriveMod
-	minChangeSAInterval    = time.Duration(5 * time.Millisecond)
-	defaultPreloadServices = 50
+	defaultSAMinSleep      = fs.Duration(100 * time.Millisecond)
+	maxServices            = 100
+	defaltPreloadServices  = 50
+	defaultSAPacerMinSleep = fs.Duration(10 * time.Millisecond)
 )
 
 // Globals
@@ -237,10 +239,28 @@ in with the ID of the root folder.
 `,
 		}, {
 			Name: "service_account_file",
-			Help: "Service Account Credentials JSON file path \nLeave blank normally.\nNeeded only if you want use SA instead of interactive login." + env.ShellExpandHelp,
-		}, {
+			Help: "Service Account Credentials JSON file path \nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
+		}, { // Mod
 			Name: "service_account_file_path",
 			Help: "Service Account Credentials JSON folder path.",
+		}, { // Mod
+			Name:     "service_account_min_sleep",
+			Default:  defaultSAMinSleep,
+			Help:     "Minimum time to sleep between change service account.",
+			Hide:     fs.OptionHideConfigurator,
+			Advanced: true,
+		}, { // Mod
+			Name:     "services_preload",
+			Default:  defaltPreloadServices,
+			Help:     "Number of service account's drive service preloaded on startup",
+			Hide:     fs.OptionHideConfigurator,
+			Advanced: true,
+		}, { // Mod
+			Name:     "services_max",
+			Default:  maxServices,
+			Help:     "Max service account's drive service stored on memory",
+			Hide:     fs.OptionHideConfigurator,
+			Advanced: true,
 		}, {
 			Name:     "service_account_credentials",
 			Help:     "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -523,7 +543,10 @@ type Options struct {
 	Scope                     string               `config:"scope"`
 	RootFolderID              string               `config:"root_folder_id"`
 	ServiceAccountFile        string               `config:"service_account_file"`
-	ServiceAccountFilePath    string               `config:"service_account_file_path"`
+	ServiceAccountFilePath    string               `config:"service_account_file_path"` // DriveMod
+	ServiceAccountMinSleep    fs.Duration          `config:"service_account_min_sleep"` // DriveMod
+	ServicesPreload           int                  `config:"services_preload"`          // DriveMod
+	ServicesMax               int                  `config:"services_max"`              // DriveMod
 	ServiceAccountCredentials string               `config:"service_account_credentials"`
 	TeamDriveID               string               `config:"team_drive"`
 	AuthOwnerOnly             bool                 `config:"auth_owner_only"`
@@ -558,13 +581,12 @@ type Options struct {
 
 // Fs represents a remote drive server
 type Fs struct {
-	name     string            // name of this remote
-	root     string            // the path we are working on
-	opt      Options           // parsed options
-	features *fs.Features      // optional features
-	svc      *drive.Service    // the connection to the drive server
-	v2Svc    *drive_v2.Service // used to create download links for the v2 api
-
+	name             string             // name of this remote
+	root             string             // the path we are working on
+	opt              Options            // parsed options
+	features         *fs.Features       // optional features
+	svc              *drive.Service     // the connection to the drive server
+	v2Svc            *drive_v2.Service  // used to create download links for the v2 api
 	client           *http.Client       // authorized client
 	rootFolderID     string             // the id of the root folder
 	dirCache         *dircache.DirCache // Map of directory path to directory id
@@ -578,12 +600,11 @@ type Fs struct {
 	listRmu          *sync.Mutex         // protects listRempties
 	listRempties     map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
 	// DriveMod: service account
-	saMu                *sync.Mutex
-	ServiceAccountPool  *ServiceAccountPool
-	minChangeSAInterval time.Duration
-	lastChangeSATime    time.Time
-	FileObj             *fs.Object
-	FileName            string
+	saMu               *sync.Mutex
+	ServiceAccountPool *ServiceAccountPool
+	lastChangeSATime   time.Time
+	FileObj            *fs.Object
+	FileName           string
 }
 
 type baseObject struct {
@@ -698,6 +719,7 @@ type ServiceAccountPool struct {
 	ID        string
 	Groups    map[string]*ServiceAccountGroup
 	LastGroup *ServiceAccountGroup
+	Max       int
 
 	Services []*drive.Service
 	existed  map[string]struct{}
@@ -708,10 +730,11 @@ type ServiceAccountPool struct {
 	mu *sync.Mutex
 }
 
-func newServiceAccountPool() *ServiceAccountPool {
+func newServiceAccountPool(max int) *ServiceAccountPool {
 	p := &ServiceAccountPool{
 		Groups:    make(map[string]*ServiceAccountGroup),
 		LastGroup: &ServiceAccountGroup{},
+		Max:       max,
 		existed:   make(map[string]struct{}),
 		mu:        new(sync.Mutex),
 		// Mutex:  new(sync.Mutex),
@@ -803,6 +826,10 @@ func (p *ServiceAccountPool) AddService(file string, svc *drive.Service) (err er
 	if _, ok := p.existed[file]; !ok {
 		p.existed[file] = struct{}{}
 		p.Services = append([]*drive.Service{svc}, p.Services...)
+
+		if len(p.Services) > p.Max {
+			p.Services = p.Services[:p.Max]
+		}
 	}
 	return nil
 }
@@ -1517,7 +1544,7 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	}
 
 	// DriveMod: ServiceAccountPool
-	pool := newServiceAccountPool()
+	pool := newServiceAccountPool(opt.ServicesMax)
 	if err := pool.Load(opt); err == nil {
 		// Assign default service account file
 		if len(opt.ServiceAccountFile) == 0 {
@@ -1549,9 +1576,8 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 		listRempties: make(map[string]struct{}),
 
 		// DriveMod
-		saMu:                new(sync.Mutex),
-		ServiceAccountPool:  pool,
-		minChangeSAInterval: minChangeSAInterval,
+		saMu:               new(sync.Mutex),
+		ServiceAccountPool: pool,
 	}
 	f.isTeamDrive = opt.TeamDriveID != ""
 	f.fileFields = f.getFileFields()
@@ -1572,7 +1598,7 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 
 	// DriveMod: Create service
 	if f.ServiceAccountPool.Size() > 0 {
-		if _, err := f.ServiceAccountPool.CreateServices(f, defaultPreloadServices); err != nil {
+		if _, err := f.ServiceAccountPool.CreateServices(f, f.opt.ServicesPreload); err != nil {
 			return nil, errors.Wrap(err, "couldn't create service for service account")
 		}
 	}
@@ -1914,17 +1940,6 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	err = f.pacer.Call(func() (bool, error) {
 		// DriveMod
 		svc := f.svc
-		// f.ServiceAccountPool.Mutex.Lock()
-		// if u, err := f.ServiceAccountPool.GetUnit(true, false); err == nil {
-		// 	// fs.Infof(nil, "Service Changed (Create): %s", u.File)
-		// 	// fmt.Printf("SVC::Create (CreateDir) <%s> | SA: %s\n", createInfo.Name, u.File)
-		// 	if s, err := u.GetService(f); err == nil {
-		// 		svc = s
-		// 	}
-		// }
-		// f.ServiceAccountPool.Mutex.Unlock()
-
-		// fs.Infof(nil, "SVC::Create (CreateDir) <%s>", createInfo.Name)
 		info, err = svc.Files.Create(createInfo).
 			Fields("id").
 			SupportsAllDrives(true).
@@ -2891,18 +2906,6 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	})
 	if err != nil {
 		return nil, err
-	} else {
-		// DriveMod
-		// if ok, _ := f.shouldChangeSA(); ok {
-		// 	// f.ServiceAccountPool.Mutex.Lock()
-		// if e := f.changeServiceAccount("Change SA after copy (f)", false); e != nil {
-		// 	fs.Errorf(f, "Change service account error: %v", err)
-		// }
-		// 	if e := srcObj.fs.changeServiceAccount("Change SA after copy (srcObj)", false); e != nil {
-		// 		fs.Errorf(f, "Change service account error: %v", err)
-		// 	}
-		// 	// f.ServiceAccountPool.Mutex.Unlock()
-		// }
 	}
 	newObject, err := f.newObjectWithInfo(remote, info)
 	if err != nil {
@@ -3395,10 +3398,10 @@ func (f *Fs) changeChunkSize(chunkSizeString string) (err error) {
 
 // DriveMod: shouldChangeSA determines whether multiple service accounts existed
 func (f *Fs) shouldChangeSA() (bool, error) {
-	if time.Now().Sub(f.lastChangeSATime) < f.minChangeSAInterval {
+	if len(f.opt.ServiceAccountFilePath) == 0 {
 		return false, nil
 	}
-	if len(f.opt.ServiceAccountFilePath) > 0 {
+	if fs.Duration(time.Now().Sub(f.lastChangeSATime)) > f.opt.ServiceAccountMinSleep {
 		return true, nil
 	}
 	return false, nil
@@ -3431,7 +3434,7 @@ func (f *Fs) changeServiceAccount(reason string, remove bool) (err error) {
 			return err
 		}
 		if len(f.ServiceAccountPool.Services) == 0 {
-			f.ServiceAccountPool.CreateServices(f, defaultPreloadServices)
+			f.ServiceAccountPool.CreateServices(f, f.opt.ServicesPreload)
 		}
 	}
 
@@ -3447,8 +3450,6 @@ func (f *Fs) changeServiceAccount(reason string, remove bool) (err error) {
 
 	if err == nil {
 		fs.Infof(nil, "Service Account Changed (fs: %s, root: %s, remain: %d, reason: %s, project (%d): %s)", f.name, f.root, f.ServiceAccountPool.Size(), reason, f.ServiceAccountPool.LastGroup.Weight, filepath.Base(f.ServiceAccountPool.LastGroup.Name))
-		// fmt.Printf("Service Account Changed (fs: %s, root: %s, remain: %d, reason: %s, project (%d): %s)\n", f.name, f.root, f.ServiceAccountPool.Size(), reason, f.ServiceAccountPool.LatestGroupWeight, filepath.Base(f.ServiceAccountPool.LatestGroupKey))
-		// fs.Infof(nil, "Service Account Changed (remain: %d, reason: %s, project (%d): %s)", f.ServiceAccountPool.Size(), reason, f.ServiceAccountPool.LatestGroupWeight, f.ServiceAccountPool.LatestGroupKey)
 	}
 	return err
 }
