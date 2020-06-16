@@ -836,12 +836,12 @@ func (p *ServiceAccountPool) AddService(file string, svc *drive.Service) (err er
 
 // GetService return service from the front
 func (p *ServiceAccountPool) GetService() (svc *drive.Service, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if len(p.Services) == 0 {
 		return nil, errors.Errorf("No available services")
 	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	svc, p.Services = p.Services[0], append(p.Services[1:], p.Services[0])
 	// fs.Infof(nil, "Remain Service: %d | %s", len(p.Services), p.ID)
@@ -986,6 +986,11 @@ func (f *Fs) Features() *fs.Features {
 // shouldRetry determines whether a given err rates being retried
 func (f *Fs) shouldRetry(err error) (bool, error) {
 	if err == nil {
+		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+		// 	f.svc = s
+		// 	// f.pacer = newPacer(&f.opt)
+		// }
+
 		return false, nil
 	}
 	if fserrors.ShouldRetry(err) {
@@ -999,6 +1004,7 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 		}
 		if len(gerr.Errors) > 0 {
 			reason := gerr.Errors[0].Reason
+			// fs.Logf(nil, "Retry: %s", reason)
 			message := gerr.Errors[0].Message
 			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" || (reason == "dailyLimitExceededUnreg" || strings.HasPrefix(message, "Daily Limit for Unauthenticated Use Exceeded")) {
 				// DriveMod: change service account
@@ -1059,7 +1065,6 @@ func (f *Fs) getFile(ID string, fields googleapi.Field) (info *drive.File, err e
 		// }
 		// f.ServiceAccountPool.Mutex.Unlock()
 
-		// fs.Infof(nil, "SVC::Get (getFile)")
 		info, err = f.svc.Files.Get(ID).
 			Fields(fields).
 			SupportsAllDrives(true).
@@ -1145,11 +1150,11 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 
 	// DriveMod
 	svc := f.svc
-	f.ServiceAccountPool.ID = f.String()
 	if s, _ := f.ServiceAccountPool.GetService(); s != nil {
 		svc = s
 		// f.pacer = newPacer(&f.opt)
 	}
+	// fs.Infof(nil, "SVC::List")
 
 	// f.ServiceAccountPool.Mutex.Lock()
 	// if u, err := f.ServiceAccountPool.GetUnit(true, false); err == nil {
@@ -1159,8 +1164,6 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 	// 	}
 	// }
 	// f.ServiceAccountPool.Mutex.Unlock()
-
-	// fs.Infof(nil, "SVC::List")
 
 	list := svc.Files.List()
 	if len(query) > 0 {
@@ -1903,6 +1906,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 // FindLeaf finds a directory of name leaf in the folder with ID pathID
 func (f *Fs) FindLeaf(ctx context.Context, pathID, leaf string) (pathIDOut string, found bool, err error) {
+	// fs.Infof(nil, "FindLeaf: %s | %s", f.Name(), leaf)
 	// Find the leaf in pathID
 	pathID = actualID(pathID)
 	found, err = f.list(ctx, []string{pathID}, leaf, true, false, false, func(item *drive.File) bool {
@@ -1940,6 +1944,12 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	err = f.pacer.Call(func() (bool, error) {
 		// DriveMod
 		svc := f.svc
+		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+		// 	svc = s
+		// 	f.pacer = newPacer(&f.opt)
+		// }
+		// fs.Infof(nil, "SVC::CreateDir")
+
 		info, err = svc.Files.Create(createInfo).
 			Fields("id").
 			SupportsAllDrives(true).
@@ -2652,7 +2662,7 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 		// Make the API request to upload metadata and file data.
 		// Don't retry, return a retry error instead
 		err = f.pacer.CallNoRetry(func() (bool, error) {
-			fs.Infof(nil, "SVC::Create")
+			// fs.Infof(nil, "SVC::Create")
 			info, err = f.svc.Files.Create(createInfo).
 				Media(in, googleapi.ContentType(srcMimeType)).
 				Fields(partialFields).
@@ -2708,7 +2718,7 @@ func (f *Fs) MergeDirs(ctx context.Context, dirs []fs.Directory) error {
 			fs.Infof(srcDir, "merging %q", info.Name)
 			// Move the file into the destination
 			err = f.pacer.Call(func() (bool, error) {
-				fs.Infof(nil, "SVC::Update (MergeDirs)")
+				// fs.Infof(nil, "SVC::Update (MergeDirs)")
 				_, err = f.svc.Files.Update(info.Id, nil).
 					RemoveParents(srcDir.ID()).
 					AddParents(dstDir.ID()).
@@ -2856,8 +2866,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		remote = remote[:len(remote)-len(ext)]
 	}
 
-	srcObj.fs.ServiceAccountPool = f.ServiceAccountPool
-	srcObj.fs.svc = f.svc
+	// st := time.Now()
+	// defer func() {
+	// 	fs.Infof(nil, "%s | drive::Copy (%.2fs), API (%.2fs)", path.Base(remote), time.Now().Sub(st).Seconds(), time.Now().Sub(api_st).Seconds())
+	// }()
+
+	// srcObj.fs.ServiceAccountPool = f.ServiceAccountPool
+	// srcObj.fs.svc = f.svc
 
 	// Look to see if there is an existing object
 	existingObject, _ := f.NewObject(ctx, remote)
@@ -2883,16 +2898,12 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	// get the ID of the thing to copy - this is the shortcut if available
 	id := shortcutID(srcObj.id)
 
-	// DriveMod: svc
+	// DriveMod
 	svc := f.svc
-	// f.ServiceAccountPool.Mutex.Lock()
-	// if u, err := f.ServiceAccountPool.GetUnit(true, false); err == nil {
-	// 	// fs.Infof(nil, "Service Changed (Copy): %s", u.File)
-	// 	if s, err := u.GetService(f); err == nil {
-	// 		svc = s
-	// 	}
+	// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+	// 	svc = s
+	// 	f.pacer = newPacer(&f.opt)
 	// }
-	// f.ServiceAccountPool.Mutex.Unlock()
 
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
@@ -3066,14 +3077,6 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	})
 	if err != nil {
 		return nil, err
-	} else {
-		// DriveMod
-		// if ok, _ := f.shouldChangeSA(); ok {
-		// 	f.ServiceAccountPool.Mutex.Lock()
-		// 	if e := f.changeServiceAccount("Chane SA after move", false); e != nil {
-		// 		fs.Errorf(f, "Change service account error: %v", err)
-		// 	}
-		// }
 	}
 
 	return f.newObjectWithInfo(remote, info)
@@ -4013,7 +4016,7 @@ func (o *baseObject) update(ctx context.Context, updateInfo *drive.File, uploadM
 	if size >= 0 && size < int64(o.fs.opt.UploadCutoff) {
 		// Don't retry, return a retry error instead
 		err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-			fs.Infof(nil, "SVC::update")
+			// fs.Infof(nil, "SVC::update")
 			info, err = o.fs.svc.Files.Update(actualID(o.id), updateInfo).
 				Media(in, googleapi.ContentType(uploadMimeType)).
 				Fields(partialFields).
