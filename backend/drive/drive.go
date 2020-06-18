@@ -1053,6 +1053,12 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
+// GetFile ....
+//* DriveMod export function
+func (f *Fs) GetFile(ID string, fields googleapi.Field) (info *drive.File, err error) {
+	return f.getFile(ID, fields)
+}
+
 // getFile returns drive.File for the ID passed and fields passed in
 func (f *Fs) getFile(ID string, fields googleapi.Field) (info *drive.File, err error) {
 	err = f.pacer.CallNoRetry(func() (bool, error) {
@@ -1894,6 +1900,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 	remote = remote[:len(remote)-len(extension)]
 	obj, err := f.newObjectWithExportInfo(remote, info, extension, exportName, exportMimeType, isDocument)
+
 	switch {
 	case err != nil:
 		return nil, err
@@ -1944,11 +1951,9 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	err = f.pacer.Call(func() (bool, error) {
 		// DriveMod
 		svc := f.svc
-		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
-		// 	svc = s
-		// 	f.pacer = newPacer(&f.opt)
-		// }
-		// fs.Infof(nil, "SVC::CreateDir")
+		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+			svc = s
+		}
 
 		info, err = svc.Files.Create(createInfo).
 			Fields("id").
@@ -1964,6 +1969,7 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 
 // CreateLeafDir makes a directory with path (non-recursive)
 // if parent is not exists, it returns an error
+//* DriveMod
 func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err error) {
 	err = f.dirCache.FindRoot(ctx, true)
 	if err != nil {
@@ -1983,15 +1989,16 @@ func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err e
 
 	parentID := f.dirCache.RootID()
 
-	directory, leaf := dircache.SplitPath(dir)
-	if directory != "" {
+	parent, leaf := dircache.SplitPath(dir)
+	if parent != "" {
 		// Find parent
-		parentID, err = f.dirCache.FindDir(ctx, directory, false)
+		parentID, err = f.dirCache.FindDir(ctx, parent, false)
 		if err != nil {
 			err = fs.ErrorDirNotFound
 			return
 		}
 	}
+
 	newID, err = f.CreateDir(ctx, parentID, leaf)
 	if err == nil {
 		f.dirCache.Put(dir, newID)
@@ -2719,6 +2726,7 @@ func (f *Fs) MergeDirs(ctx context.Context, dirs []fs.Directory) error {
 			// Move the file into the destination
 			err = f.pacer.Call(func() (bool, error) {
 				// fs.Infof(nil, "SVC::Update (MergeDirs)")
+
 				_, err = f.svc.Files.Update(info.Id, nil).
 					RemoveParents(srcDir.ID()).
 					AddParents(dstDir.ID()).
@@ -2929,6 +2937,66 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		}
 	}
 	return newObject, nil
+}
+
+// CopyByID get src object by ID and copy to remote using server side copy operations.
+//* DriveMod
+func (f *Fs) CopyByID(ctx context.Context, srcID string, remote string) (fs.Object, error) {
+	var err error
+	var file *drive.File
+	err = f.pacer.Call(func() (bool, error) {
+		// fs.Infof(nil, "SVC::Copy")
+		file, err = f.svc.Files.Get(srcID).
+			Fields("name", "id", "size", "mimeType").
+			SupportsAllDrives(true).
+			Do()
+		return f.shouldRetry(err)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	extension, exportName, exportMimeType, isDocument := f.findExportFormat(file)
+	src, err := f.newObjectWithExportInfo(file.Name, file, extension, exportName, exportMimeType, isDocument)
+	if err != nil {
+		return nil, err
+	}
+
+	return f.Copy(ctx, src, remote)
+}
+
+// ListAllDrives fetch all team drives
+//* DriveMod
+func (f *Fs) ListAllDrives(ctx context.Context) (map[string]string, error) {
+	var err error
+	driveMap := make(map[string]string)
+
+	listTeamDrives := f.svc.Teamdrives.List().PageSize(100)
+	for {
+		var teamDrives *drive.TeamDriveList
+		err = f.pacer.Call(func() (bool, error) {
+			teamDrives, err = listTeamDrives.Context(ctx).Do()
+			return f.shouldRetry(err)
+		})
+		if err != nil {
+			return nil, errors.Errorf("Listing team drives failed: %v\n", err)
+			// listFailed = true
+			break
+		}
+		for _, drive := range teamDrives.TeamDrives {
+			driveMap[drive.Id] = drive.Name
+		}
+		if teamDrives.NextPageToken == "" {
+			break
+		}
+		listTeamDrives.PageToken(teamDrives.NextPageToken)
+	}
+
+	if len(driveMap) == 0 {
+		return nil, errors.Errorf("No team drives found in your account")
+	}
+
+	return driveMap, nil
 }
 
 // Purge deletes all the files and the container
@@ -3452,7 +3520,7 @@ func (f *Fs) changeServiceAccount(reason string, remove bool) (err error) {
 	}
 
 	if err == nil {
-		fs.Infof(nil, "Service Account Changed (fs: %s, root: %s, remain: %d, reason: %s, project (%d): %s)", f.name, f.root, f.ServiceAccountPool.Size(), reason, f.ServiceAccountPool.LastGroup.Weight, filepath.Base(f.ServiceAccountPool.LastGroup.Name))
+		fs.Debugf(nil, "Service Account Changed (fs: %s, root: %s, remain: %d, reason: %s, project (%d): %s)", f.name, f.root, f.ServiceAccountPool.Size(), reason, f.ServiceAccountPool.LastGroup.Weight, filepath.Base(f.ServiceAccountPool.LastGroup.Name))
 	}
 	return err
 }
