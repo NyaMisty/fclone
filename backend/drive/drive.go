@@ -664,6 +664,7 @@ func newServiceAccount(group string, file string) (*ServiceAccount, error) {
 	return u, nil
 }
 
+// Initialized ....
 func (u *ServiceAccount) Initialized() bool {
 	return u.initialized
 }
@@ -1078,6 +1079,12 @@ func (f *Fs) getFile(ID string, fields googleapi.Field) (info *drive.File, err e
 		return f.shouldRetry(err)
 	})
 	return info, err
+}
+
+// GetRootID ....
+//* DriveMod export function
+func (f *Fs) GetRootID() (string, error) {
+	return f.getRootID()
 }
 
 // getRootID returns the canonical ID for the "root" ID
