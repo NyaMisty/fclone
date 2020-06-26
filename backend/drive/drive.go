@@ -77,7 +77,7 @@ const (
 	listRInputBuffer = 1000 // size of input buffer when using ListR
 
 	// DriveMod
-	defaultSAMinSleep      = fs.Duration(100 * time.Millisecond)
+	defaultSAMinSleep      = fs.Duration(10 * time.Millisecond)
 	maxServices            = 100
 	defaltPreloadServices  = 50
 	defaultSAPacerMinSleep = fs.Duration(10 * time.Millisecond)
@@ -909,12 +909,14 @@ func (p *ServiceAccountPool) _getAccount(random bool, remove bool) (sa *ServiceA
 		sort.Ints(weights)
 		weight := weights[0]
 
+		accounts := make([]*ServiceAccount, 0)
 		for _, v := range group.List {
 			if v.Weight == weight {
-				sa = v
-				break
+				accounts = append(accounts, v)
 			}
 		}
+
+		sa = accounts[rand.Intn(len(accounts))]
 	}
 
 	p.LastGroup = group
@@ -986,6 +988,7 @@ func (f *Fs) Features() *fs.Features {
 
 // shouldRetry determines whether a given err rates being retried
 func (f *Fs) shouldRetry(err error) (bool, error) {
+
 	if err == nil {
 		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
 		// 	f.svc = s
@@ -1009,8 +1012,10 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 			message := gerr.Errors[0].Message
 			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" || (reason == "dailyLimitExceededUnreg" || strings.HasPrefix(message, "Daily Limit for Unauthenticated Use Exceeded")) {
 				// DriveMod: change service account
+				// if f.hasSA() {
 				f.saMu.Lock()
 				defer f.saMu.Unlock()
+
 				if ok, _ := f.shouldChangeSA(); ok {
 					if e := f.changeServiceAccount(reason, true); e != nil {
 						fs.Errorf(f, "Change service account error: %v", err)
@@ -1019,6 +1024,7 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 					}
 					return true, err
 				}
+				// }
 
 				if f.opt.StopOnUploadLimit && gerr.Errors[0].Message == "User rate limit exceeded." {
 					fs.Errorf(f, "Received upload limit error: %v", err)
@@ -1054,7 +1060,7 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
-// GetFile ....
+// GetFile returns drive.File for the ID passed and fields passed in
 //* DriveMod export function
 func (f *Fs) GetFile(ID string, fields googleapi.Field) (info *drive.File, err error) {
 	return f.getFile(ID, fields)
@@ -1360,6 +1366,7 @@ func configTeamDrive(ctx context.Context, opt *Options, m configmap.Mapper, name
 	}
 	fmt.Printf("Fetching team drive list...\n")
 	var driveIDs, driveNames []string
+
 	listTeamDrives := svc.Teamdrives.List().PageSize(100)
 	listFailed := false
 	var defaultFs Fs // default Fs with default Options
@@ -1401,6 +1408,8 @@ func newPacer(opt *Options) *fs.Pacer {
 
 // getClient makes an http client according to the options
 func getClient(opt *Options) *http.Client {
+	// fs.Config.UserAgent = fs.Config.UserAgent + "-a" + strconv.Itoa(rand.Intn(100))
+
 	t := fshttp.NewTransportCustom(fs.Config, func(t *http.Transport) {
 		if opt.DisableHTTP2 {
 			t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
@@ -1427,18 +1436,6 @@ func getServiceAccountClient(opt *Options, credentialsData []byte) (*http.Client
 func createOAuthClient(opt *Options, name string, m configmap.Mapper) (*http.Client, error) {
 	var oAuthClient *http.Client
 	var err error
-
-	// DriveMod: try to find service account file if not set
-	// if len(opt.ServiceAccountFile) == 0 {
-	// 	box := newServiceAccountPool()
-	// 	fs.Infof(nil, "createOAuthClient - Load SA Box")
-	// 	if err := box.Load(opt); err == nil {
-	// 		if file, err := box.GetAccount(true, false); err == nil {
-	// 			opt.ServiceAccountFile = file
-	// 			fs.Debugf(nil, "Assigned Service Account File to %s", file)
-	// 		}
-	// 	}
-	// }
 
 	// try loading service account credentials from env variable, then from a file
 	if len(opt.ServiceAccountCredentials) == 0 && opt.ServiceAccountFile != "" {
@@ -1958,9 +1955,9 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	err = f.pacer.Call(func() (bool, error) {
 		// DriveMod
 		svc := f.svc
-		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
-			svc = s
-		}
+		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+		// 	svc = s
+		// }
 
 		info, err = svc.Files.Create(createInfo).
 			Fields("id").
@@ -2881,14 +2878,6 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		remote = remote[:len(remote)-len(ext)]
 	}
 
-	// st := time.Now()
-	// defer func() {
-	// 	fs.Infof(nil, "%s | drive::Copy (%.2fs), API (%.2fs)", path.Base(remote), time.Now().Sub(st).Seconds(), time.Now().Sub(api_st).Seconds())
-	// }()
-
-	// srcObj.fs.ServiceAccountPool = f.ServiceAccountPool
-	// srcObj.fs.svc = f.svc
-
 	// Look to see if there is an existing object
 	existingObject, _ := f.NewObject(ctx, remote)
 
@@ -2914,7 +2903,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	id := shortcutID(srcObj.id)
 
 	// DriveMod
-	svc := f.svc
+	// svc := f.svc
 	// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
 	// 	svc = s
 	// 	f.pacer = newPacer(&f.opt)
@@ -2922,7 +2911,15 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
-		// fs.Infof(nil, "SVC::Copy")
+		// fs.Infof(nil, "SVC::Copy | %s", srcObj.Remote())
+
+		// DriveMod
+		svc := f.svc
+		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+			svc = s
+			f.pacer = newPacer(&f.opt)
+		}
+
 		info, err = svc.Files.Copy(id, createInfo).
 			Fields(partialFields).
 			SupportsAllDrives(true).
@@ -3348,7 +3345,14 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 func (f *Fs) changeNotifyStartPageToken() (pageToken string, err error) {
 	var startPageToken *drive.StartPageToken
 	err = f.pacer.Call(func() (bool, error) {
-		changes := f.svc.Changes.GetStartPageToken().SupportsAllDrives(true)
+		// DriveMod
+		svc := f.svc
+		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+			svc = s
+			// f.pacer = newPacer(&f.opt)
+		}
+
+		changes := svc.Changes.GetStartPageToken().SupportsAllDrives(true)
 		if f.isTeamDrive {
 			changes.DriveId(f.opt.TeamDriveID)
 		}
@@ -3367,7 +3371,14 @@ func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.
 		var changeList *drive.ChangeList
 
 		err = f.pacer.Call(func() (bool, error) {
-			changesCall := f.svc.Changes.List(pageToken).
+			// DriveMod
+			svc := f.svc
+			if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+				svc = s
+				// f.pacer = newPacer(&f.opt)
+			}
+
+			changesCall := svc.Changes.List(pageToken).
 				Fields("nextPageToken,newStartPageToken,changes(fileId,file(name,parents,mimeType))")
 			if f.opt.ListChunk > 0 {
 				changesCall.PageSize(f.opt.ListChunk)
@@ -3483,6 +3494,16 @@ func (f *Fs) shouldChangeSA() (bool, error) {
 		return true, nil
 	}
 	return false, nil
+}
+
+func (f *Fs) hasSA() bool {
+	if f.ServiceAccountPool == nil {
+		return false
+	}
+	if len(f.opt.ServiceAccountFilePath) == 0 {
+		return false
+	}
+	return true
 }
 
 // DriveMod:
