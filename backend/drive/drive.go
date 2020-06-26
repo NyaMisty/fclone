@@ -2985,7 +2985,7 @@ func (f *Fs) ListAllDrives(ctx context.Context) (map[string]string, error) {
 		if err != nil {
 			return nil, errors.Errorf("Listing team drives failed: %v\n", err)
 			// listFailed = true
-			break
+			// break
 		}
 		for _, drive := range teamDrives.TeamDrives {
 			driveMap[drive.Id] = drive.Name
