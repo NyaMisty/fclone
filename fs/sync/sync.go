@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+
+	"github.com/rclone/rclone/backend/drive"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/filter"
@@ -69,6 +71,10 @@ type syncCopyMove struct {
 	compareCopyDest        fs.Fs                  // place to check for files to server side copy
 	backupDir              fs.Fs                  // place to store overwrites/deletes
 	checkFirst             bool                   // if set run all the checkers before starting transfers
+
+	// Mod
+	srcOnlyDirsMu sync.Mutex             // protect srcOnlyDirs
+	srcOnlyDirs   map[string]fs.DirEntry // src only dirs
 }
 
 type trackRenamesStrategy byte
@@ -103,6 +109,7 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		dstFilesResult:         make(chan error, 1),
 		dstEmptyDirs:           make(map[string]fs.DirEntry),
 		srcEmptyDirs:           make(map[string]fs.DirEntry),
+		srcOnlyDirs:            make(map[string]fs.DirEntry), // Mod
 		noTraverse:             fs.Config.NoTraverse,
 		noCheckDest:            fs.Config.NoCheckDest,
 		noUnicodeNormalization: fs.Config.NoUnicodeNormalization,
@@ -583,6 +590,42 @@ func copyEmptyDirectories(ctx context.Context, f fs.Fs, entries map[string]fs.Di
 	return nil
 }
 
+// This creates the src only directories on dst in the slice passed in
+// Mod: Currently only Drive (dst) is supported
+func createNewDirectories(ctx context.Context, f fs.Fs, entries map[string]fs.DirEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+
+	driveF, ok := f.(*drive.Fs)
+	if !ok {
+		// Do nothing if not Drive
+		return nil
+		// return copyEmptyDirectories(ctx, f, entries)
+	}
+
+	fs.Infof(f, "Pre-creating directories before transfers")
+
+	// Drive
+	dirs := make([]string, len(entries))
+	for _, entry := range entries {
+		dir, ok := entry.(fs.Directory)
+		if ok {
+			dirs = append(dirs, dir.Remote())
+		}
+	}
+
+	err := driveF.CreateDirs(ctx, true, dirs)
+	okCount := len(entries)
+	if err == nil {
+		fs.Debugf(f, "created %d directories", okCount)
+		fs.Infof(nil, "Pre-creating finished")
+	} else {
+		fs.Debugf(nil, "can't create directory due to error: %v", err)
+		fs.Infof(nil, "Pre-creating cancelled")
+	}
+	return nil
+}
 func (s *syncCopyMove) srcParentDirCheck(entry fs.DirEntry) {
 	// If we are moving files then we don't want to remove directories with files in them
 	// from the srcEmptyDirs as we are about to move them making the directory empty.
@@ -824,6 +867,8 @@ func (s *syncCopyMove) run() error {
 	// Stop background checking and transferring pipeline
 	s.stopCheckers()
 	if s.checkFirst {
+		s.processError(createNewDirectories(s.ctx, s.fdst, s.srcOnlyDirs))
+
 		fs.Infof(s.fdst, "Checks finished, now starting transfers")
 		s.startTransfers()
 	}
@@ -952,6 +997,11 @@ func (s *syncCopyMove) SrcOnly(src fs.DirEntry) (recurse bool) {
 		s.srcParentDirCheck(src)
 		s.srcEmptyDirs[src.Remote()] = src
 		s.srcEmptyDirsMu.Unlock()
+
+		// Mod
+		s.srcOnlyDirsMu.Lock()
+		s.srcOnlyDirs[src.Remote()] = src
+		s.srcOnlyDirsMu.Unlock()
 		return true
 	default:
 		panic("Bad object in DirEntries")

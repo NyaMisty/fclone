@@ -1732,7 +1732,13 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	}
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
-		info, err = f.svc.Files.Create(createInfo).
+		// Mod
+		svc := f.svc
+		if s, _ := f.serviceAccountPool.GetService(); err == nil && s != nil {
+			svc = s
+		}
+
+		info, err = svc.Files.Create(createInfo).
 			Fields("id").
 			SupportsAllDrives(true).
 			Do()
@@ -1742,6 +1748,105 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 		return "", err
 	}
 	return info.Id, nil
+}
+
+// Mod: CreateDirs makes multiple directory
+func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (err error) {
+	err = f.dirCache.FindRoot(ctx, true)
+
+	processing := make(map[string]struct{})
+	mu := sync.Mutex{}
+
+	toBeCreated := make(chan string, len(dirs)+fs.Config.Transfers)
+	var wg sync.WaitGroup
+	for i := 0; i < fs.Config.Transfers; i++ {
+		go func() {
+			for dir := range toBeCreated {
+				done := make(chan struct{})
+				go func() {
+					defer func() {
+						wg.Done()
+						close(done)
+					}()
+
+					if _, ok := f.dirCache.Get(dir); ok {
+						return
+					}
+
+					mu.Lock()
+					if _, ok := processing[dir]; ok {
+						mu.Unlock()
+						return
+					}
+					processing[dir] = struct{}{}
+					mu.Unlock()
+
+					parent, leaf := dircache.SplitPath(dir)
+					parentID, ok := f.dirCache.Get(parent)
+					if ok {
+						if newID, err := f.CreateDir(ctx, parentID, leaf); err == nil {
+							fs.Infof(nil, "%s: Directory Created", dir)
+							f.dirCache.Put(dir, newID)
+						}
+					} else {
+						wg.Add(1)
+						// toBeCreated <- parent
+						// fs.Logf(nil, "Adding Directory: %s", parent)
+						time.Sleep(time.Duration(100+rand.Intn(500)) * time.Millisecond)
+						toBeCreated <- dir
+						// fs.Logf(nil, "Adding Directory: %s", dir)
+					}
+
+					mu.Lock()
+					delete(processing, dir)
+					mu.Unlock()
+				}()
+				<-done
+			}
+		}()
+	}
+
+	seen := make(map[string]struct{})
+	for _, dir := range dirs {
+		if _, ok := f.dirCache.Get(dir); ok {
+			continue
+		}
+
+		newDirs := make([]string, 0)
+
+		// dir not exists
+		if _, ok := seen[dir]; !ok {
+			seen[dir] = struct{}{}
+			newDirs = append(newDirs, dir)
+		}
+
+		for {
+			parent, _ := dircache.SplitPath(dir)
+			if parent == "" {
+				break
+			}
+			if _, ok := f.dirCache.Get(parent); ok {
+				break
+			}
+
+			if _, ok := seen[parent]; !ok {
+				seen[parent] = struct{}{}
+				newDirs = append(newDirs, parent)
+			}
+
+			dir = parent
+		}
+
+		wg.Add(len(newDirs))
+		for i := len(newDirs) - 1; i >= 0; i-- {
+			toBeCreated <- newDirs[i]
+		}
+	}
+
+	wg.Wait()
+	close(toBeCreated)
+
+	return nil
 }
 
 // isAuthOwned checks if any of the item owners is the authenticated owner
@@ -2633,7 +2738,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
-		info, err = f.svc.Files.Copy(id, createInfo).
+		// Mod
+		svc := f.svc
+		if s, _ := f.serviceAccountPool.GetService(); err == nil && s != nil {
+			svc = s
+		}
+
+		info, err = svc.Files.Copy(id, createInfo).
 			Fields(partialFields).
 			SupportsAllDrives(true).
 			KeepRevisionForever(f.opt.KeepRevisionForever).
