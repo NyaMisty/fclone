@@ -1387,6 +1387,7 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 				f.pacer = newPacer(opt)
 			}
 		}
+	}
 
 	// If impersonating warn about root_folder_id if set and unset it
 	//
@@ -2049,7 +2050,7 @@ func (f *Fs) listRRunner(ctx context.Context, wg *sync.WaitGroup, in chan listRE
 			// the listR runners if they all get here
 			wg.Add(len(recycled))
 			go func() {
-				defer func(){
+				defer func() {
 					recover()
 				}()
 				for _, entry := range recycled {
