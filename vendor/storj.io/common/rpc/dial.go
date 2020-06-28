@@ -7,16 +7,13 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/zeebo/errs"
-	"go.uber.org/zap"
 
 	"storj.io/common/memory"
 	"storj.io/common/netutil"
-	"storj.io/common/pb"
 	"storj.io/common/peertls/tlsopts"
 	"storj.io/common/rpc/rpcpool"
 	"storj.io/common/rpc/rpctracing"
@@ -140,32 +137,6 @@ func (d Dialer) dialContext(ctx context.Context, address string) (net.Conn, erro
 	}, nil
 }
 
-// DialNode creates an rpc connection to the specified node.
-func (d Dialer) DialNode(ctx context.Context, node *pb.Node) (_ *Conn, err error) {
-	if node == nil {
-		return nil, Error.New("node is nil")
-	}
-
-	defer mon.Task()(&ctx, "node: "+node.Id.String()[0:8])(&err)
-
-	if d.TLSOptions == nil {
-		return nil, Error.New("tls options not set when required for this dial")
-	}
-
-	return d.dial(ctx, node.GetAddress().GetAddress(), d.TLSOptions.ClientTLSConfig(node.Id))
-}
-
-// DialAddressID dials to the specified address and asserts it has the given node id.
-func (d Dialer) DialAddressID(ctx context.Context, address string, id storj.NodeID) (_ *Conn, err error) {
-	defer mon.Task()(&ctx, "node: "+id.String()[0:8])(&err)
-
-	if d.TLSOptions == nil {
-		return nil, Error.New("tls options not set when required for this dial")
-	}
-
-	return d.dial(ctx, address, d.TLSOptions.ClientTLSConfig(id))
-}
-
 // DialNodeURL dials to the specified node url and asserts it has the given node id.
 func (d Dialer) DialNodeURL(ctx context.Context, nodeURL storj.NodeURL) (_ *Conn, err error) {
 	defer mon.Task()(&ctx, "node: "+nodeURL.ID.String()[0:8])(&err)
@@ -175,56 +146,6 @@ func (d Dialer) DialNodeURL(ctx context.Context, nodeURL storj.NodeURL) (_ *Conn
 	}
 
 	return d.dial(ctx, nodeURL.Address, d.TLSOptions.ClientTLSConfig(nodeURL.ID))
-}
-
-// DialAddressInsecureBestEffort is like DialAddressInsecure but tries to dial a node securely if
-// it can.
-//
-// nodeURL is like a storj.NodeURL but (a) requires an address and (b) does not require a
-// full node id and will work with just a node prefix. The format is either:
-//  * node_host:node_port
-//  * node_id_prefix@node_host:node_port
-// Examples:
-//  * 33.20.0.1:7777
-//  * [2001:db8:1f70::999:de8:7648:6e8]:7777
-//  * 12vha9oTFnerx@33.20.0.1:7777
-//  * 12vha9oTFnerx@[2001:db8:1f70::999:de8:7648:6e8]:7777
-//
-// DialAddressInsecureBestEffort:
-//  * will use a node id if provided in the nodeURL paramenter
-//  * will otherwise look up the node address in a known map of node address to node ids and use
-// 		the remembered node id.
-//  * will otherwise dial insecurely
-func (d Dialer) DialAddressInsecureBestEffort(ctx context.Context, nodeURL string) (_ *Conn, err error) {
-	defer mon.Task()(&ctx)(&err)
-
-	if d.TLSOptions == nil {
-		return nil, Error.New("tls options not set when required for this dial")
-	}
-
-	var nodeIDPrefix, nodeAddress string
-	parts := strings.Split(nodeURL, "@")
-	switch len(parts) {
-	default:
-		return nil, Error.New("malformed node url: %q", nodeURL)
-	case 1:
-		nodeAddress = parts[0]
-	case 2:
-		nodeIDPrefix, nodeAddress = parts[0], parts[1]
-	}
-
-	if len(nodeIDPrefix) > 0 {
-		return d.dial(ctx, nodeAddress, d.TLSOptions.ClientTLSConfigPrefix(nodeIDPrefix))
-	}
-
-	if nodeID, found := KnownNodeID(nodeAddress); found {
-		return d.dial(ctx, nodeAddress, d.TLSOptions.ClientTLSConfig(nodeID))
-	}
-
-	zap.L().Warn(`Unknown node id for address. Specify node id in the form "node_id@node_host:node_port" for added security`,
-		zap.String("Address", nodeAddress),
-	)
-	return d.dial(ctx, nodeAddress, d.TLSOptions.UnverifiedClientTLSConfig())
 }
 
 // DialAddressInsecure dials to the specified address and does not check the node id.
