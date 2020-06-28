@@ -515,3 +515,5 @@ storj.io/uplink/private/storage/segments
 storj.io/uplink/private/storage/streams
 storj.io/uplink/private/stream
 storj.io/uplink/private/testuplink
+# github.com/rclone/rclone => D:/Projects/Golang/src/github.com/mawaya/rclone-fwwkr
+# github.com/mawaya/rclone => D:/Projects/Golang/src/github.com/mawaya/rclone-fwwkr
