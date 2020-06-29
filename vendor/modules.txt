@@ -3,8 +3,7 @@
 bazil.org/fuse
 bazil.org/fuse/fs
 bazil.org/fuse/fuseutil
-# cloud.google.com/go v0.53.0
-## explicit
+# cloud.google.com/go v0.56.0
 cloud.google.com/go/compute/metadata
 # github.com/Azure/azure-pipeline-go v0.2.2
 ## explicit
@@ -119,7 +118,7 @@ github.com/dropbox/dropbox-sdk-go-unofficial/dropbox/users_common
 github.com/gogo/protobuf/proto
 # github.com/golang/groupcache v0.0.0-20200121045136-8c9f03a8e57e
 github.com/golang/groupcache/lru
-# github.com/golang/protobuf v1.3.3
+# github.com/golang/protobuf v1.3.5
 github.com/golang/protobuf/proto
 github.com/golang/protobuf/ptypes
 github.com/golang/protobuf/ptypes/any
@@ -349,7 +348,7 @@ golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/agent
 golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
 golang.org/x/crypto/ssh/terminal
-# golang.org/x/net v0.0.0-20200222125558-5a598a2470a0
+# golang.org/x/net v0.0.0-20200324143707-d3edc9973b7e
 ## explicit
 golang.org/x/net/bpf
 golang.org/x/net/context
@@ -377,11 +376,11 @@ golang.org/x/oauth2/google
 golang.org/x/oauth2/internal
 golang.org/x/oauth2/jws
 golang.org/x/oauth2/jwt
-# golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e
+# golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
 ## explicit
 golang.org/x/sync/errgroup
 golang.org/x/sync/semaphore
-# golang.org/x/sys v0.0.0-20200223170610-d5e6a3e2c0ae
+# golang.org/x/sys v0.0.0-20200331124033-c3d80250170d
 ## explicit
 golang.org/x/sys/cpu
 golang.org/x/sys/unix
@@ -396,7 +395,7 @@ golang.org/x/text/unicode/norm
 # golang.org/x/time v0.0.0-20191024005414-555d28b269f0
 ## explicit
 golang.org/x/time/rate
-# google.golang.org/api v0.21.1-0.20200411000818-c8cf5cff125e
+# google.golang.org/api v0.28.0
 ## explicit
 google.golang.org/api/drive/v2
 google.golang.org/api/drive/v3
@@ -422,10 +421,9 @@ google.golang.org/appengine/internal/modules
 google.golang.org/appengine/internal/remote_api
 google.golang.org/appengine/internal/urlfetch
 google.golang.org/appengine/urlfetch
-# google.golang.org/genproto v0.0.0-20200225123651-fc8f55426688
-## explicit
+# google.golang.org/genproto v0.0.0-20200331122359-1ee6d9798940
 google.golang.org/genproto/googleapis/rpc/status
-# google.golang.org/grpc v1.27.1
+# google.golang.org/grpc v1.28.0
 google.golang.org/grpc
 google.golang.org/grpc/attributes
 google.golang.org/grpc/backoff
@@ -447,8 +445,10 @@ google.golang.org/grpc/internal/binarylog
 google.golang.org/grpc/internal/buffer
 google.golang.org/grpc/internal/channelz
 google.golang.org/grpc/internal/envconfig
+google.golang.org/grpc/internal/grpclog
 google.golang.org/grpc/internal/grpcrand
 google.golang.org/grpc/internal/grpcsync
+google.golang.org/grpc/internal/grpcutil
 google.golang.org/grpc/internal/resolver/dns
 google.golang.org/grpc/internal/resolver/passthrough
 google.golang.org/grpc/internal/syscall
