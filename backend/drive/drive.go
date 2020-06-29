@@ -1843,7 +1843,7 @@ func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (coun
 		parentID, ok := f.dirCache.Get(parent)
 		if ok {
 			if newID, err := f.CreateDir(ctx, parentID, leaf); err == nil {
-				fs.Infof(nil, "%s: Directory Created", t.path)
+				// fs.Infof(nil, "%s: Directory Created", t.path)
 				f.dirCache.Put(t.path, newID)
 				done = true
 			}
@@ -1880,7 +1880,7 @@ Loop:
 				break Loop
 			}
 
-			fs.Logf(nil, "%s: Directory Created (Pending: %d)", t.path, len(tasks))
+			fs.Infof(nil, "%s: Directory Created (Pending: %d)", t.path, len(tasks))
 			for _, tt := range tasks {
 				if tt.parent == t.path {
 					wg.Add(1)
