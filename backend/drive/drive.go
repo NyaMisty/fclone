@@ -986,6 +986,11 @@ func (f *Fs) Features() *fs.Features {
 	return f.features
 }
 
+// DirCache ....
+func (f *Fs) DirCache() *dircache.DirCache {
+	return f.dirCache
+}
+
 // shouldRetry determines whether a given err rates being retried
 func (f *Fs) shouldRetry(err error) (bool, error) {
 
@@ -1173,16 +1178,6 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 		svc = s
 		// f.pacer = newPacer(&f.opt)
 	}
-	// fs.Infof(nil, "SVC::List")
-
-	// f.ServiceAccountPool.Mutex.Lock()
-	// if u, err := f.ServiceAccountPool.GetUnit(true, false); err == nil {
-	// 	if s, err := u.GetService(f); err == nil {
-	// 		svc = s
-	// 		f.pacer = newPacer(&f.opt)
-	// 	}
-	// }
-	// f.ServiceAccountPool.Mutex.Unlock()
 
 	list := svc.Files.List()
 	if len(query) > 0 {
@@ -1408,7 +1403,6 @@ func newPacer(opt *Options) *fs.Pacer {
 
 // getClient makes an http client according to the options
 func getClient(opt *Options) *http.Client {
-	// fs.Config.UserAgent = fs.Config.UserAgent + "-a" + strconv.Itoa(rand.Intn(100))
 
 	t := fshttp.NewTransportCustom(fs.Config, func(t *http.Transport) {
 		if opt.DisableHTTP2 {
@@ -1951,18 +1945,21 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 		MimeType:    driveFolderType,
 		Parents:     []string{pathID},
 	}
+
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
 		// DriveMod
 		svc := f.svc
-		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
-		// 	svc = s
-		// }
+		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+			svc = s
+		}
 
+		st := time.Now()
 		info, err = svc.Files.Create(createInfo).
 			Fields("id").
 			SupportsAllDrives(true).
 			Do()
+		fs.Errorf(nil, "API::Create (%.1fs)", time.Now().Sub(st).Seconds())
 		return f.shouldRetry(err)
 	})
 	if err != nil {
@@ -1975,20 +1972,27 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 // if parent is not exists, it returns an error
 //* DriveMod
 func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err error) {
+	// st := time.Now()
+	defer func() {
+		// fs.Errorf(nil, "Drive::CreateLeafDir (%.1fs)", time.Now().Sub(st).Seconds())
+	}()
 	err = f.dirCache.FindRoot(ctx, true)
 	if err != nil {
 		return
 	}
-
 	// root
 	if dir == "" {
 		return f.dirCache.RootID(), err
 	}
 
 	// check if exists
-	newID, err = f.dirCache.FindDir(ctx, dir, false)
-	if err == nil {
-		return
+	// newID, err = f.dirCache.FindDir(ctx, dir, false)
+	// if err == nil {
+	// return
+	// }
+	newID, ok := f.dirCache.Get(dir)
+	if ok {
+		return newID, nil
 	}
 
 	parentID := f.dirCache.RootID()
@@ -1996,10 +2000,14 @@ func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err e
 	parent, leaf := dircache.SplitPath(dir)
 	if parent != "" {
 		// Find parent
-		parentID, err = f.dirCache.FindDir(ctx, parent, false)
-		if err != nil {
-			err = fs.ErrorDirNotFound
-			return
+		// parentID, err = f.dirCache.FindDir(ctx, parent, false)
+		// if err != nil {
+		// 	err = fs.ErrorDirNotFound
+		// 	return
+		// }
+		parentID, ok = f.dirCache.Get(parent)
+		if !ok {
+			return "", fs.ErrorDirNotFound
 		}
 	}
 
@@ -2009,6 +2017,116 @@ func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err e
 	}
 
 	return
+}
+
+// CreateDirs makes multiple directory
+func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (count int, err error) {
+	err = f.dirCache.FindRoot(ctx, true)
+
+	processing := make(map[string]struct{})
+	mu := sync.Mutex{}
+
+	toBeCreated := make(chan string, len(dirs)+fs.Config.Transfers)
+	created := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < fs.Config.Transfers; i++ {
+		go func() {
+			for dir := range toBeCreated {
+				done := make(chan struct{})
+				go func() {
+					defer func() {
+						wg.Done()
+						close(done)
+					}()
+
+					if _, ok := f.dirCache.Get(dir); ok {
+						return
+					}
+
+					mu.Lock()
+					if _, ok := processing[dir]; ok {
+						mu.Unlock()
+						return
+					}
+					processing[dir] = struct{}{}
+					mu.Unlock()
+
+					parent, leaf := dircache.SplitPath(dir)
+					parentID, ok := f.dirCache.Get(parent)
+					if ok {
+						if newID, err := f.CreateDir(ctx, parentID, leaf); err == nil {
+							fs.Debugf(nil, "%s: Directory Created", dir)
+							f.dirCache.Put(dir, newID)
+							created <- struct{}{}
+						}
+					} else {
+						wg.Add(1)
+						// toBeCreated <- parent
+						time.Sleep(time.Duration(100+rand.Intn(500)) * time.Millisecond)
+						toBeCreated <- dir
+					}
+
+					mu.Lock()
+					delete(processing, dir)
+					mu.Unlock()
+				}()
+				<-done
+			}
+		}()
+	}
+
+	seen := make(map[string]struct{})
+	for _, dir := range dirs {
+		if _, ok := f.dirCache.Get(dir); ok {
+			continue
+		}
+
+		newDirs := make([]string, 0)
+
+		// dir not exists
+		if _, ok := seen[dir]; !ok {
+			seen[dir] = struct{}{}
+			newDirs = append(newDirs, dir)
+		}
+
+		for {
+			parent, _ := dircache.SplitPath(dir)
+			if parent == "" {
+				break
+			}
+			if _, ok := f.dirCache.Get(parent); ok {
+				break
+			}
+
+			if _, ok := seen[parent]; !ok {
+				seen[parent] = struct{}{}
+				newDirs = append(newDirs, parent)
+			}
+
+			dir = parent
+		}
+
+		wg.Add(len(newDirs))
+		for i := len(newDirs) - 1; i >= 0; i-- {
+			toBeCreated <- newDirs[i]
+		}
+	}
+
+	count = 0
+	go func() {
+		for {
+			_, ok := <-created
+			if !ok {
+				break
+			}
+			count = count + 1
+		}
+	}()
+	wg.Wait()
+	close(toBeCreated)
+	close(created)
+
+	return count, nil
 }
 
 // isAuthOwned checks if any of the item owners is the authenticated owner
@@ -2317,6 +2435,9 @@ func (f *Fs) listRRunner(ctx context.Context, wg *sync.WaitGroup, in chan listRE
 			// the listR runners if they all get here
 			wg.Add(len(recycled))
 			go func() {
+				defer func() {
+					recover()
+				}()
 				for _, entry := range recycled {
 					if in != nil {
 						in <- entry
@@ -2914,13 +3035,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		// fs.Infof(nil, "SVC::Copy | %s", srcObj.Remote())
 
 		// DriveMod
-		svc := f.svc
-		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
-			svc = s
-			f.pacer = newPacer(&f.opt)
-		}
+		// svc := f.svc
+		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+		// 	svc = s
+		// 	f.pacer = newPacer(&f.opt)
+		// }
 
-		info, err = svc.Files.Copy(id, createInfo).
+		info, err = f.svc.Files.Copy(id, createInfo).
 			Fields(partialFields).
 			SupportsAllDrives(true).
 			KeepRevisionForever(f.opt.KeepRevisionForever).
