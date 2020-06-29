@@ -631,6 +631,7 @@ func createNewDirectories(ctx context.Context, f fs.Fs, entries map[string]fs.Di
 	}
 	return nil
 }
+
 func (s *syncCopyMove) srcParentDirCheck(entry fs.DirEntry) {
 	// If we are moving files then we don't want to remove directories with files in them
 	// from the srcEmptyDirs as we are about to move them making the directory empty.
