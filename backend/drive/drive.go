@@ -1972,12 +1972,10 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 			svc = s
 		}
 
-		st := time.Now()
 		info, err = svc.Files.Create(createInfo).
 			Fields("id").
 			SupportsAllDrives(true).
 			Do()
-		fs.Errorf(nil, "API::Create (%.1fs)", time.Now().Sub(st).Seconds())
 		return f.shouldRetry(err)
 	})
 	if err != nil {
@@ -1991,9 +1989,9 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 //* DriveMod
 func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err error) {
 	// st := time.Now()
-	defer func() {
-		// fs.Errorf(nil, "Drive::CreateLeafDir (%.1fs)", time.Now().Sub(st).Seconds())
-	}()
+	// defer func() {
+	// fs.Errorf(nil, "Drive::CreateLeafDir (%.1fs)", time.Now().Sub(st).Seconds())
+	// }()
 	err = f.dirCache.FindRoot(ctx, true)
 	if err != nil {
 		return
@@ -3054,13 +3052,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		// fs.Infof(nil, "SVC::Copy | %s", srcObj.Remote())
 
 		// DriveMod
-		// svc := f.svc
-		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
-		// 	svc = s
-		// 	f.pacer = newPacer(&f.opt)
-		// }
+		svc := f.svc
+		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+			svc = s
+			f.pacer = newPacer(&f.opt)
+		}
 
-		info, err = f.svc.Files.Copy(id, createInfo).
+		info, err = svc.Files.Copy(id, createInfo).
 			Fields(partialFields).
 			SupportsAllDrives(true).
 			KeepRevisionForever(f.opt.KeepRevisionForever).
