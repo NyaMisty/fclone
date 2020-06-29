@@ -620,14 +620,14 @@ func createNewDirectories(ctx context.Context, f fs.Fs, entries map[string]fs.Di
 		}
 	}
 
-	err := driveF.CreateDirs(ctx, true, dirs)
-	okCount := len(entries)
+	okCount, err := driveF.CreateDirs(ctx, true, dirs)
+	// okCount := len(entries)
 	if err == nil {
-		fs.Debugf(f, "created %d directories", okCount)
+		fs.Infof(f, "created %d directories", okCount)
 		fs.Infof(nil, "Pre-creating finished")
 	} else {
-		fs.Debugf(nil, "can't create directory due to error: %v", err)
-		fs.Infof(nil, "Pre-creating cancelled")
+		fs.Debugf(nil, "can't create all directory due to error: %v", err)
+		fs.Infof(nil, "Pre-creating cancelled - continue to normal operations")
 	}
 	return nil
 }

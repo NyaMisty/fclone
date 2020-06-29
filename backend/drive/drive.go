@@ -1751,13 +1751,14 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 }
 
 // Mod: CreateDirs makes multiple directory
-func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (err error) {
+func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (count int, err error) {
 	err = f.dirCache.FindRoot(ctx, true)
 
 	processing := make(map[string]struct{})
 	mu := sync.Mutex{}
 
 	toBeCreated := make(chan string, len(dirs)+fs.Config.Transfers)
+	created := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < fs.Config.Transfers; i++ {
 		go func() {
@@ -1785,16 +1786,15 @@ func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (err 
 					parentID, ok := f.dirCache.Get(parent)
 					if ok {
 						if newID, err := f.CreateDir(ctx, parentID, leaf); err == nil {
-							fs.Infof(nil, "%s: Directory Created", dir)
+							fs.Debugf(nil, "%s: Directory Created", dir)
 							f.dirCache.Put(dir, newID)
+							created <- struct{}{}
 						}
 					} else {
 						wg.Add(1)
 						// toBeCreated <- parent
-						// fs.Logf(nil, "Adding Directory: %s", parent)
 						time.Sleep(time.Duration(100+rand.Intn(500)) * time.Millisecond)
 						toBeCreated <- dir
-						// fs.Logf(nil, "Adding Directory: %s", dir)
 					}
 
 					mu.Lock()
@@ -1843,10 +1843,21 @@ func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (err 
 		}
 	}
 
+	count = 0
+	go func() {
+		for {
+			_, ok := <-created
+			if !ok {
+				break
+			}
+			count = count + 1
+		}
+	}()
 	wg.Wait()
 	close(toBeCreated)
+	close(created)
 
-	return nil
+	return count, nil
 }
 
 // isAuthOwned checks if any of the item owners is the authenticated owner
