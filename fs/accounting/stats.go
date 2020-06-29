@@ -268,6 +268,12 @@ func (s *StatsInfo) String() string {
 		displaySpeed *= 8
 	}
 
+	// Mod
+	fspeed := 0.0
+	if dt > 0 {
+		fspeed = float64(s.transfers) / dtSeconds
+	}
+
 	var (
 		totalChecks   = int64(s.checkQueue) + s.checks + int64(checking)
 		totalTransfer = int64(s.transferQueue) + s.transfers + int64(transferring)
@@ -278,13 +284,11 @@ func (s *StatsInfo) String() string {
 		buf          = &bytes.Buffer{}
 		xfrchkString = ""
 		dateString   = ""
-		fpsString    = ""
-	)
 
-	// DriveMod: Add files/second
-	if dtSeconds > 0 {
-		fpsString = fmt.Sprintf(", %.2f Files/s", float64(s.transfers)/dtSeconds)
-	}
+		// Mod
+		fpsString        = fmt.Sprintf("%.2f Files/s", fspeed)
+		fpsOneLineString = ""
+	)
 
 	if !fs.Config.StatsOneLine {
 		_, _ = fmt.Fprintf(buf, "\nTransferred:   	")
@@ -303,9 +307,10 @@ func (s *StatsInfo) String() string {
 			t := time.Now()
 			dateString = t.Format(fs.Config.StatsOneLineDateFormat) // Including the separator so people can customize it
 		}
+		// Mod
+		fpsOneLineString = fmt.Sprintf(", %s, ETA %s", fpsString, etaString(s.transfers, totalTransfer, fspeed))
 	}
 
-	// DriveMod: Add files/second
 	_, _ = fmt.Fprintf(buf, "%s%10s / %s, %s, %s, ETA %s%s%s\n",
 		dateString,
 		fs.SizeSuffix(s.bytes),
@@ -314,7 +319,7 @@ func (s *StatsInfo) String() string {
 		fs.SizeSuffix(displaySpeed).Unit(strings.Title(fs.Config.DataRateUnit)+"/s"),
 		etaString(currentSize, totalSize, speed),
 		xfrchkString,
-		fpsString,
+		fpsOneLineString,
 	)
 
 	if !fs.Config.StatsOneLine {
@@ -344,11 +349,10 @@ func (s *StatsInfo) String() string {
 			_, _ = fmt.Fprintf(buf, "Renamed:       %10d\n", s.renames)
 		}
 		if s.transfers != 0 || totalTransfer != 0 {
-			// _, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s\n",
-			// s.transfers, totalTransfer, percent(s.transfers, totalTransfer))
-			// DriveMod: Add number of files
-			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s%s\n",
-				s.transfers, totalTransfer, percent(s.transfers, totalTransfer), fpsString)
+			// Mod: Add number of files
+			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s, %s, ETA %s\n",
+				s.transfers, totalTransfer, percent(s.transfers, totalTransfer), fpsString,
+				etaString(s.transfers, totalTransfer, fspeed))
 		}
 		_, _ = fmt.Fprintf(buf, "Elapsed time:  %10ss\n", strings.TrimRight(dt.Truncate(time.Minute).String(), "0s")+fmt.Sprintf("%.1f", dtSecondsOnly.Seconds()))
 	}
