@@ -380,9 +380,12 @@ date is used.`,
 			Help:     "Size of listing chunk 100-1000. 0 to disable.",
 			Advanced: true,
 		}, {
-			Name:     "impersonate",
-			Default:  "",
-			Help:     "Impersonate this user when using a service account.",
+			Name:    "impersonate",
+			Default: "",
+			Help: `Impersonate this user when using a service account.
+
+Note that if this is used then "root_folder_id" will be ignored.
+`,
 			Advanced: true,
 		}, {
 			Name:    "alternate_export",
@@ -1617,9 +1620,20 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 		}
 	}
 
+	// If impersonating warn about root_folder_id if set and unset it
+	//
+	// This is because rclone v1.51 and v1.52 cached root_folder_id when
+	// using impersonate which they shouldn't have done. It is possible
+	// someone is using impersonate and root_folder_id in which case this
+	// breaks their workflow. There isn't an easy way around that.
+	if opt.RootFolderID != "" && opt.Impersonate != "" {
+		fs.Logf(f, "Ignoring cached root_folder_id when using --drive-impersonate")
+		opt.RootFolderID = ""
+	}
+
 	// set root folder for a team drive or query the user root folder
 	if opt.RootFolderID != "" {
-		// override root folder if set or cached in the config
+		// override root folder if set or cached in the config and not impersonating
 		f.rootFolderID = opt.RootFolderID
 	} else if f.isTeamDrive {
 		f.rootFolderID = f.opt.TeamDriveID
@@ -1636,7 +1650,10 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 			}
 		}
 		f.rootFolderID = rootID
-		m.Set("root_folder_id", rootID)
+		// Don't cache the root folder ID if impersonating
+		if opt.Impersonate == "" {
+			m.Set("root_folder_id", rootID)
+		}
 	}
 
 	f.dirCache = dircache.New(root, f.rootFolderID, f)
@@ -1939,6 +1956,7 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	leaf = f.opt.Enc.FromStandardName(leaf)
 	// fmt.Println("Making", path)
 	// Define the metadata for the directory we are going to create.
+	pathID = actualID(pathID)
 	createInfo := &drive.File{
 		Name:        leaf,
 		Description: leaf,
@@ -2675,9 +2693,10 @@ func (f *Fs) resolveShortcut(item *drive.File) (newItem *drive.File, err error) 
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to resolve shortcut")
 	}
-	// make sure we use the Name and Parents from the original item
+	// make sure we use the Name, Parents and Trashed from the original item
 	newItem.Name = item.Name
 	newItem.Parents = item.Parents
+	newItem.Trashed = item.Trashed
 	// the new ID is a composite ID
 	newItem.Id = joinID(newItem.Id, item.Id)
 	return newItem, nil

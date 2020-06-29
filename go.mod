@@ -65,7 +65,7 @@ require (
 	golang.org/x/time v0.0.0-20191024005414-555d28b269f0
 	google.golang.org/api v0.28.0
 	gopkg.in/yaml.v2 v2.2.8
-	storj.io/uplink v1.0.7
+	storj.io/uplink v1.1.1
 )
 
 go 1.14
