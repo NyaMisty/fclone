@@ -613,7 +613,7 @@ func createNewDirectories(ctx context.Context, f fs.Fs, entries map[string]fs.Di
 	fs.Infof(f, "Pre-creating directories before transfers")
 
 	// Drive
-	dirs := make([]string, len(entries))
+	dirs := make([]string, 0)
 	for _, entry := range entries {
 		dir, ok := entry.(fs.Directory)
 		if ok {
@@ -627,7 +627,7 @@ func createNewDirectories(ctx context.Context, f fs.Fs, entries map[string]fs.Di
 		fs.Infof(f, "created %d directories", okCount)
 		fs.Infof(nil, "Pre-creating finished")
 	} else {
-		fs.Debugf(nil, "can't create all directory due to error: %v", err)
+		fs.Errorf(nil, "can't pre-create all directory due to error: %v", err)
 		fs.Infof(nil, "Pre-creating cancelled - continue to normal operations")
 	}
 	return nil

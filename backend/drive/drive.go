@@ -2035,112 +2035,160 @@ func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err e
 	return
 }
 
+// DriveMod
+
+type createDirTask struct {
+	path    string
+	parent  string
+	depth   int
+	retries int
+}
+
+func newCreateDirTasks(path string) createDirTask {
+	parent, _ := dircache.SplitPath(path)
+	return createDirTask{
+		path:   path,
+		parent: parent,
+		depth:  strings.Count(filepath.ToSlash(path), "/"),
+	}
+}
+
+// type createDirTasks []createDirTask
+
+// func (t createDirTasks) Len() int           { return len(t) }
+// func (t createDirTasks) Less(i, j int) bool { return t[i].depth < t[j].depth }
+// func (t createDirTasks) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
+
+func (f *Fs) createDirsRunner(ctx context.Context, wg *sync.WaitGroup, in chan createDirTask, out chan<- createDirTask, errs chan<- error, cb func(createDirTask) (bool, error)) {
+	for t := range in {
+		ok, err := cb(t)
+		if ok {
+			out <- t
+		} else {
+			if err != nil {
+				if t.retries > fs.Config.LowLevelRetries {
+					errs <- err
+				}
+				t.retries = t.retries + 1
+			}
+
+			wg.Add(1)
+			go func() {
+				time.Sleep(time.Duration(100*t.depth+(t.retries+1)*rand.Intn(100)) * time.Millisecond)
+				in <- t
+			}()
+		}
+	}
+}
+
 // CreateDirs makes multiple directory
 func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (count int, err error) {
 	err = f.dirCache.FindRoot(ctx, true)
 
-	processing := make(map[string]struct{})
-	mu := sync.Mutex{}
-
-	toBeCreated := make(chan string, len(dirs)+fs.Config.Transfers)
-	created := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < fs.Config.Transfers; i++ {
-		go func() {
-			for dir := range toBeCreated {
-				done := make(chan struct{})
-				go func() {
-					defer func() {
-						wg.Done()
-						close(done)
-					}()
-
-					if _, ok := f.dirCache.Get(dir); ok {
-						return
-					}
-
-					mu.Lock()
-					if _, ok := processing[dir]; ok {
-						mu.Unlock()
-						return
-					}
-					processing[dir] = struct{}{}
-					mu.Unlock()
-
-					parent, leaf := dircache.SplitPath(dir)
-					parentID, ok := f.dirCache.Get(parent)
-					if ok {
-						if newID, err := f.CreateDir(ctx, parentID, leaf); err == nil {
-							fs.Debugf(nil, "%s: Directory Created", dir)
-							f.dirCache.Put(dir, newID)
-							created <- struct{}{}
-						}
-					} else {
-						wg.Add(1)
-						// toBeCreated <- parent
-						time.Sleep(time.Duration(100+rand.Intn(500)) * time.Millisecond)
-						toBeCreated <- dir
-					}
-
-					mu.Lock()
-					delete(processing, dir)
-					mu.Unlock()
-				}()
-				<-done
-			}
-		}()
-	}
-
-	seen := make(map[string]struct{})
+	// discover new directories
+	tasks := make(map[string]createDirTask)
 	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
 		if _, ok := f.dirCache.Get(dir); ok {
 			continue
 		}
 
-		newDirs := make([]string, 0)
-
-		// dir not exists
-		if _, ok := seen[dir]; !ok {
-			seen[dir] = struct{}{}
-			newDirs = append(newDirs, dir)
-		}
+		tasks[dir] = newCreateDirTasks(dir)
 
 		for {
 			parent, _ := dircache.SplitPath(dir)
-			if parent == "" {
-				break
-			}
 			if _, ok := f.dirCache.Get(parent); ok {
 				break
 			}
-
-			if _, ok := seen[parent]; !ok {
-				seen[parent] = struct{}{}
-				newDirs = append(newDirs, parent)
-			}
-
+			tasks[parent] = newCreateDirTasks(parent)
 			dir = parent
-		}
-
-		wg.Add(len(newDirs))
-		for i := len(newDirs) - 1; i >= 0; i-- {
-			toBeCreated <- newDirs[i]
 		}
 	}
 
-	count = 0
-	go func() {
-		for {
-			_, ok := <-created
-			if !ok {
-				break
-			}
-			count = count + 1
+	mu := sync.Mutex{}
+	wg := sync.WaitGroup{}
+	toBeCreated := make(chan createDirTask, len(tasks))
+	created := make(chan createDirTask)
+	errs := make(chan error)
+
+	processing := make(map[string]struct{})
+	cb := func(t createDirTask) (done bool, err error) {
+		defer func() {
+			wg.Done()
+		}()
+
+		if _, ok := f.dirCache.Get(t.path); ok {
+			return true, nil
 		}
-	}()
+
+		mu.Lock()
+		if _, ok := processing[t.path]; ok {
+			mu.Unlock()
+			return false, nil
+		}
+		processing[t.path] = struct{}{}
+		mu.Unlock()
+
+		parent, leaf := dircache.SplitPath(t.path)
+		parentID, ok := f.dirCache.Get(parent)
+		if ok {
+			var newID string
+			if newID, err = f.CreateDir(ctx, parentID, leaf); err == nil {
+				// fs.Infof(nil, "%s: Directory Created", t.path)
+				f.dirCache.Put(t.path, newID)
+				done = true
+			}
+		}
+
+		mu.Lock()
+		delete(processing, t.path)
+		mu.Unlock()
+
+		return done, err
+	}
+
+	// start workers
+	for i := 0; i < fs.Config.Transfers; i++ {
+		go f.createDirsRunner(ctx, &wg, toBeCreated, created, errs, cb)
+	}
+
+	// add tasks (parent existed)
+	for _, t := range tasks {
+		if _, ok := f.dirCache.Get(t.parent); ok {
+			wg.Add(1)
+			toBeCreated <- t
+		}
+	}
+
+	// add tasks (parent created)
+Loop:
+	for {
+		select {
+		case t := <-created:
+			count = count + 1
+
+			delete(tasks, t.path)
+			fs.Infof(nil, "%s: Directory Created (Pending: %d)", t.path, len(tasks))
+			if len(tasks) == 0 {
+				break Loop
+			}
+
+			for _, tt := range tasks {
+				if tt.parent == t.path {
+					wg.Add(1)
+					toBeCreated <- tt
+				}
+			}
+		case err = <-errs:
+			return count, err
+		}
+	}
+
 	wg.Wait()
 	close(toBeCreated)
-	close(created)
+	// close(created)
 
 	return count, nil
 }
