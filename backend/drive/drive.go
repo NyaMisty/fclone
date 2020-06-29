@@ -79,7 +79,7 @@ const (
 	defaultSAMinSleep      = fs.Duration(100 * time.Millisecond)
 	maxServices            = 75
 	defaltPreloadServices  = 50
-	defaultSAPacerMinSleep = fs.Duration(80 * time.Millisecond)
+	defaultSAPacerMinSleep = fs.Duration(50 * time.Millisecond)
 )
 
 // Globals
@@ -1782,7 +1782,7 @@ func (f *Fs) createDirsRunner(ctx context.Context, wg *sync.WaitGroup, in chan c
 
 			wg.Add(1)
 			go func() {
-				time.Sleep(time.Duration(100*t.depth+rand.Intn(100)) * time.Millisecond)
+				time.Sleep(time.Duration(100*t.depth+(t.retries+1)*rand.Intn(100)) * time.Millisecond)
 				in <- t
 			}()
 		}
@@ -1842,7 +1842,8 @@ func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (coun
 		parent, leaf := dircache.SplitPath(t.path)
 		parentID, ok := f.dirCache.Get(parent)
 		if ok {
-			if newID, err := f.CreateDir(ctx, parentID, leaf); err == nil {
+			var newID string
+			if newID, err = f.CreateDir(ctx, parentID, leaf); err == nil {
 				// fs.Infof(nil, "%s: Directory Created", t.path)
 				f.dirCache.Put(t.path, newID)
 				done = true
@@ -1875,12 +1876,13 @@ Loop:
 		select {
 		case t := <-created:
 			count = count + 1
+
 			delete(tasks, t.path)
+			fs.Infof(nil, "%s: Directory Created (Pending: %d)", t.path, len(tasks))
 			if len(tasks) == 0 {
 				break Loop
 			}
 
-			fs.Infof(nil, "%s: Directory Created (Pending: %d)", t.path, len(tasks))
 			for _, tt := range tasks {
 				if tt.parent == t.path {
 					wg.Add(1)
