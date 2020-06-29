@@ -604,6 +604,11 @@ func createNewDirectories(ctx context.Context, f fs.Fs, entries map[string]fs.Di
 		// return copyEmptyDirectories(ctx, f, entries)
 	}
 
+	if fs.Config.DryRun {
+		fs.Logf(nil, "Not creating directories as --dry-run")
+		return nil
+	}
+
 	fs.Infof(f, "Pre-creating directories before transfers")
 
 	// Drive
