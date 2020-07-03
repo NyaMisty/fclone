@@ -287,18 +287,17 @@ func (s *StatsInfo) String() string {
 
 		// Mod
 		fpsString        = fmt.Sprintf("%.2f Files/s", fspeed)
-		fpsOneLineString = ""	
+		fpsOneLineString = ""
 	)
-
 
 	if !fs.Config.StatsOneLine {
 		_, _ = fmt.Fprintf(buf, "\nTransferred:   	")
 	} else {
 		xfrchk := []string{}
-		if totalTransfer > 0 && s.transferQueue > 0 {
+		if totalTransfer > 0 { // && s.transferQueue > 0 {
 			xfrchk = append(xfrchk, fmt.Sprintf("xfr#%d/%d", s.transfers, totalTransfer))
 		}
-		if totalChecks > 0 && s.checkQueue > 0 {
+		if totalChecks > 0 { // && s.checkQueue > 0 {
 			xfrchk = append(xfrchk, fmt.Sprintf("chk#%d/%d", s.checks, totalChecks))
 		}
 		if len(xfrchk) > 0 {
@@ -352,7 +351,7 @@ func (s *StatsInfo) String() string {
 		if s.transfers != 0 || totalTransfer != 0 {
 			// Mod: Add number of files
 			_, _ = fmt.Fprintf(buf, "Transferred:   %10d / %d, %s, %s, ETA %s\n",
-				s.transfers, totalTransfer, percent(s.transfers, totalTransfer), fpsString, 
+				s.transfers, totalTransfer, percent(s.transfers, totalTransfer), fpsString,
 				etaString(s.transfers, totalTransfer, fspeed))
 		}
 		_, _ = fmt.Fprintf(buf, "Elapsed time:  %10ss\n", strings.TrimRight(dt.Truncate(time.Minute).String(), "0s")+fmt.Sprintf("%.1f", dtSecondsOnly.Seconds()))
