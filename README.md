@@ -8,7 +8,7 @@
 
 ## Unofficial  Channels 
 
-Please visit the following channels for helps:
+Please visit the following channels for helps or optimal configs:
 * Community: [JSU Forum](https://bbs.jsu.net/c/personal-project/rclone-fwwkr-mod/18)
 * Telegram Group: [@sharegdrive](https://t.me/sharegdrive)
 
