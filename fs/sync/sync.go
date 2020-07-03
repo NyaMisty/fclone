@@ -874,9 +874,11 @@ func (s *syncCopyMove) run() error {
 	// Stop background checking and transferring pipeline
 	s.stopCheckers()
 	if s.checkFirst {
-		for d := range s.srcEmptyDirs {
-			if _, ok := s.srcOnlyDirs[d]; ok {
-				delete(s.srcOnlyDirs, d)
+		if !s.copyEmptySrcDirs {
+			for d := range s.srcEmptyDirs {
+				if _, ok := s.srcOnlyDirs[d]; ok {
+					delete(s.srcOnlyDirs, d)
+				}
 			}
 		}
 		s.processError(createNewDirectories(s.ctx, s.fdst, s.srcOnlyDirs))
