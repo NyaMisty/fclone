@@ -3470,26 +3470,26 @@ func (f *Fs) makeShortcut(ctx context.Context, srcPath string, dstFs *Fs, dstPat
 }
 
 // List all team drives with right
-func (f *Fs) listDrives(ctx context.Context) (driveMap map[string]string, err error) {
-	driveMap = make(map[string]string)
+func (f *Fs) listDrives(ctx context.Context) (driveMap map[string]*drive.Drive, err error) {
+	driveMap = make(map[string]*drive.Drive)
 
-	listTeamDrives := f.svc.Teamdrives.List().PageSize(100)
+	listDrives := f.svc.Drives.List().PageSize(100)
 	for {
-		var teamDrives *drive.TeamDriveList
+		var drives *drive.DriveList
 		err = f.pacer.Call(func() (bool, error) {
-			teamDrives, err = listTeamDrives.Context(ctx).Do()
+			drives, err = listDrives.Context(ctx).Do()
 			return f.shouldRetry(err)
 		})
 		if err != nil {
 			return nil, errors.Errorf("Listing team drives failed: %v\n", err)
 		}
-		for _, drive := range teamDrives.TeamDrives {
-			driveMap[drive.Id] = drive.Name
+		for _, drive := range drives.Drives {
+			driveMap[drive.Id] = drive
 		}
-		if teamDrives.NextPageToken == "" {
+		if drives.NextPageToken == "" {
 			break
 		}
-		listTeamDrives.PageToken(teamDrives.NextPageToken)
+		listDrives.PageToken(drives.NextPageToken)
 	}
 
 	return driveMap, err
@@ -3630,7 +3630,7 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 		}
 
 		sep := "\t"
-		if s, ok := opt["separator"]; ok{
+		if s, ok := opt["separator"]; ok {
 			sep = s
 		}
 
@@ -3646,17 +3646,17 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 
 		// sort
 		keys := make([]string, 0)
-		for _, name := range driveMap {
-			keys = append(keys, name)
+		for _, drive := range driveMap {
+			keys = append(keys, drive.Name)
 		}
 		sort.Strings(keys)
 
 		for _, k := range keys {
-			for id, name := range driveMap {
-				if name != k {
+			for _, drive := range driveMap {
+				if drive.Name != k {
 					continue
 				}
-				fmt.Printf("%s%s%s\n", id, sep, name)
+				fmt.Printf("%s%s%s\n", drive.Id, sep, drive.Name)
 			}
 		}
 
