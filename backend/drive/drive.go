@@ -3469,6 +3469,32 @@ func (f *Fs) makeShortcut(ctx context.Context, srcPath string, dstFs *Fs, dstPat
 	return dstFs.newObjectWithInfo(dstPath, info)
 }
 
+// List all team drives with right
+func (f *Fs) listDrives(ctx context.Context) (driveMap map[string]string, err error) {
+	driveMap = make(map[string]string)
+
+	listTeamDrives := f.svc.Teamdrives.List().PageSize(100)
+	for {
+		var teamDrives *drive.TeamDriveList
+		err = f.pacer.Call(func() (bool, error) {
+			teamDrives, err = listTeamDrives.Context(ctx).Do()
+			return f.shouldRetry(err)
+		})
+		if err != nil {
+			return nil, errors.Errorf("Listing team drives failed: %v\n", err)
+		}
+		for _, drive := range teamDrives.TeamDrives {
+			driveMap[drive.Id] = drive.Name
+		}
+		if teamDrives.NextPageToken == "" {
+			break
+		}
+		listTeamDrives.PageToken(teamDrives.NextPageToken)
+	}
+
+	return driveMap, err
+}
+
 var commandHelp = []fs.CommandHelp{{
 	Name:  "get",
 	Short: "Get command for fetching the drive config parameters",
@@ -3519,6 +3545,19 @@ authenticated with "drive2:" can't read files from "drive:".
 `,
 	Opts: map[string]string{
 		"target": "optional target remote for the shortcut destination",
+	},
+}, {
+	Name:  "lsdrives",
+	Short: "List all shared drives with right",
+	Long: `This command list all shared drives with right
+
+Usage:
+
+    rclone backend lsdrives drive: 
+    rclone backend lsdrives drive: -o separator=;
+`,
+	Opts: map[string]string{
+		"separator": `Separator for the items in the format. (default "[TAB]")`,
 	},
 }}
 
@@ -3583,6 +3622,45 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 			}
 		}
 		return f.makeShortcut(ctx, arg[0], dstFs, arg[1])
+
+	// Mod
+	case "lsdrives":
+		if len(arg) >= 1 {
+			return nil, errors.New("no arguments needed")
+		}
+
+		sep := "\t"
+		if s, ok := opt["separator"]; ok{
+			sep = s
+		}
+
+		driveMap, err := f.listDrives(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(driveMap) == 0 {
+			fs.Infof(f, "No team drives found")
+			return nil, nil
+		}
+
+		// sort
+		keys := make([]string, 0)
+		for _, name := range driveMap {
+			keys = append(keys, name)
+		}
+		sort.Strings(keys)
+
+		for _, k := range keys {
+			for id, name := range driveMap {
+				if name != k {
+					continue
+				}
+				fmt.Printf("%s%s%s\n", id, sep, name)
+			}
+		}
+
+		return nil, nil
 	default:
 		return nil, fs.ErrorCommandNotFound
 	}
