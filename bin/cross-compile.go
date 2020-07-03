@@ -171,7 +171,7 @@ func buildDebAndRpm(dir, version, goarch string) []string {
 // build the binary in dir returning success or failure
 func compileArch(version, goos, goarch, dir string) bool {
 	log.Printf("Compiling %s/%s", goos, goarch)
-	output := filepath.Join(dir, "rclone")
+	output := filepath.Join(dir, "gclone")
 	if goos == "windows" {
 		output += ".exe"
 	}
