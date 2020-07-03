@@ -1,3 +1,3 @@
 package fs
 
-var Version = "v0.3.0"
+var Version = "v0.3.1-DEV"
