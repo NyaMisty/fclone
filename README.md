@@ -4,7 +4,7 @@
 ## Features
 
   * Compatible with rclone and gclone
-  * Enhancement for Google Drive
+  * Enhancement for Google Drive (for service accounts)
 
 ## Unofficial  Channels 
 
