@@ -1040,8 +1040,6 @@ func TestSyncWithMaxDuration(t *testing.T) {
 	startTime := time.Now()
 	err := Sync(context.Background(), r.Fremote, r.Flocal, false)
 	require.Equal(t, context.DeadlineExceeded, errors.Cause(err))
-	err = accounting.GlobalStats().GetLastError()
-	require.NoError(t, err)
 
 	elapsed := time.Since(startTime)
 	maxTransferTime := (time.Duration(len(testFiles)) * 60 * time.Second) / time.Duration(bytesPerSecond)
@@ -1149,6 +1147,44 @@ func TestSyncWithTrackRenamesStrategyModtime(t *testing.T) {
 
 	// Now rename locally.
 	f2 = r.RenameFile(f2, "yaml")
+
+	accounting.GlobalStats().ResetCounters()
+	require.NoError(t, Sync(context.Background(), r.Fremote, r.Flocal, false))
+
+	fstest.CheckItems(t, r.Fremote, f1, f2)
+
+	// Check we renamed something if we should have
+	if canTrackRenames {
+		renames := accounting.GlobalStats().Renames(0)
+		assert.Equal(t, canTrackRenames, renames != 0, fmt.Sprintf("canTrackRenames=%v, renames=%d", canTrackRenames, renames))
+	}
+}
+
+func TestSyncWithTrackRenamesStrategyLeaf(t *testing.T) {
+	r := fstest.NewRun(t)
+	defer r.Finalise()
+
+	fs.Config.TrackRenames = true
+	fs.Config.TrackRenamesStrategy = "leaf"
+	defer func() {
+		fs.Config.TrackRenames = false
+		fs.Config.TrackRenamesStrategy = "hash"
+	}()
+
+	canTrackRenames := operations.CanServerSideMove(r.Fremote) && r.Fremote.Precision() != fs.ModTimeNotSupported
+	t.Logf("Can track renames: %v", canTrackRenames)
+
+	f1 := r.WriteFile("potato", "Potato Content", t1)
+	f2 := r.WriteFile("sub/yam", "Yam Content", t2)
+
+	accounting.GlobalStats().ResetCounters()
+	require.NoError(t, Sync(context.Background(), r.Fremote, r.Flocal, false))
+
+	fstest.CheckItems(t, r.Fremote, f1, f2)
+	fstest.CheckItems(t, r.Flocal, f1, f2)
+
+	// Now rename locally.
+	f2 = r.RenameFile(f2, "yam")
 
 	accounting.GlobalStats().ResetCounters()
 	require.NoError(t, Sync(context.Background(), r.Fremote, r.Flocal, false))

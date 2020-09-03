@@ -37,7 +37,6 @@ func init() {
 	proxyflags.AddFlags(flagSet)
 	flags.StringVarP(flagSet, &hashName, "etag-hash", "", "", "Which hash to use for the ETag, or auto or blank for off")
 	flags.BoolVarP(flagSet, &disableGETDir, "disable-dir-list", "", false, "Disable HTML directory list on GET request for a directory")
-
 }
 
 // Command definition for cobra

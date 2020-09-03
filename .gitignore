@@ -9,6 +9,4 @@ rclone.iml
 *.test
 *.log
 *.iml
-rclone.exe
-
-.vscode/launch.json
+fuzz-build.zip

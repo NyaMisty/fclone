@@ -30,6 +30,8 @@ type Options struct {
 	CaseInsensitive   bool
 	WriteWait         time.Duration // time to wait for in-sequence write
 	ReadWait          time.Duration // time to wait for in-sequence read
+	WriteBack         time.Duration // time to wait before writing back dirty files
+	ReadAhead         fs.SizeSuffix // bytes to read ahead in cache mode "full"
 }
 
 // DefaultOpt is the default values uses for Opt
@@ -54,4 +56,6 @@ var DefaultOpt = Options{
 	CaseInsensitive:   runtime.GOOS == "windows" || runtime.GOOS == "darwin", // default to true on Windows and Mac, false otherwise
 	WriteWait:         1000 * time.Millisecond,
 	ReadWait:          20 * time.Millisecond,
+	WriteBack:         5 * time.Second,
+	ReadAhead:         0 * fs.MebiByte,
 }

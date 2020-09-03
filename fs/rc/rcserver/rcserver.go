@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rclone/rclone/fs/rc/webgui"
+
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -60,12 +62,14 @@ func Start(opt *rc.Options) (*Server, error) {
 // Server contains everything to run the rc server
 type Server struct {
 	*httplib.Server
-	files http.Handler
-	opt   *rc.Options
+	files          http.Handler
+	pluginsHandler http.Handler
+	opt            *rc.Options
 }
 
 func newServer(opt *rc.Options, mux *http.ServeMux) *Server {
 	fileHandler := http.Handler(nil)
+	pluginsHandler := http.Handler(nil)
 	// Add some more mime types which are often missing
 	_ = mime.AddExtensionType(".wasm", "application/wasm")
 	_ = mime.AddExtensionType(".js", "application/javascript")
@@ -80,7 +84,7 @@ func newServer(opt *rc.Options, mux *http.ServeMux) *Server {
 		fs.Logf(nil, "Serving files from %q", opt.Files)
 		fileHandler = http.FileServer(http.Dir(opt.Files))
 	} else if opt.WebUI {
-		if err := rc.CheckAndDownloadWebGUIRelease(opt.WebGUIUpdate, opt.WebGUIForceUpdate, opt.WebGUIFetchURL, config.CacheDir); err != nil {
+		if err := webgui.CheckAndDownloadWebGUIRelease(opt.WebGUIUpdate, opt.WebGUIForceUpdate, opt.WebGUIFetchURL, config.CacheDir); err != nil {
 			log.Fatalf("Error while fetching the latest release of Web GUI: %v", err)
 		}
 		if opt.NoAuth {
@@ -103,12 +107,15 @@ func newServer(opt *rc.Options, mux *http.ServeMux) *Server {
 
 		fs.Logf(nil, "Serving Web GUI")
 		fileHandler = http.FileServer(http.Dir(extractPath))
+
+		pluginsHandler = http.FileServer(http.Dir(webgui.PluginsPath))
 	}
 
 	s := &Server{
-		Server: httplib.NewServer(mux, &opt.HTTPOptions),
-		opt:    opt,
-		files:  fileHandler,
+		Server:         httplib.NewServer(mux, &opt.HTTPOptions),
+		opt:            opt,
+		files:          fileHandler,
+		pluginsHandler: pluginsHandler,
 	}
 	mux.HandleFunc("/", s.handler)
 
@@ -248,7 +255,6 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string)
 			return
 		}
 	}
-
 	// Find the call
 	call := rc.Calls.Get(path)
 	if call == nil {
@@ -260,6 +266,14 @@ func (s *Server) handlePost(w http.ResponseWriter, r *http.Request, path string)
 	if !s.opt.NoAuth && call.AuthRequired && !s.UsingAuth() {
 		writeError(path, in, w, errors.Errorf("authentication must be set up on the rc server to use %q or the --rc-no-auth flag must be in use", path), http.StatusForbidden)
 		return
+	}
+	if call.NeedsRequest {
+		// Add the request to RC
+		in["_request"] = r
+	}
+
+	if call.NeedsResponse {
+		in["_response"] = w
 	}
 
 	// Check to see if it is async or not
@@ -358,11 +372,12 @@ var fsMatch = regexp.MustCompile(`^\[(.*?)\](.*)$`)
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, path string) {
 	// Look to see if this has an fs in the path
-	match := fsMatch.FindStringSubmatch(path)
+	fsMatchResult := fsMatch.FindStringSubmatch(path)
+
 	switch {
-	case match != nil && s.opt.Serve:
+	case fsMatchResult != nil && s.opt.Serve:
 		// Serve /[fs]/remote files
-		s.serveRemote(w, r, match[2], match[1])
+		s.serveRemote(w, r, fsMatchResult[2], fsMatchResult[1])
 		return
 	case path == "metrics" && s.opt.EnableMetrics:
 		promHandler.ServeHTTP(w, r)
@@ -372,6 +387,19 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, path string) 
 		s.serveRoot(w, r)
 		return
 	case s.files != nil:
+		pluginsMatchResult := webgui.PluginsMatch.FindStringSubmatch(path)
+
+		if s.opt.WebUI && pluginsMatchResult != nil && len(pluginsMatchResult) > 2 {
+			ok := webgui.ServePluginOK(w, r, pluginsMatchResult)
+			if !ok {
+				r.URL.Path = fmt.Sprintf("/%s/%s/app/build/%s", pluginsMatchResult[1], pluginsMatchResult[2], pluginsMatchResult[3])
+				s.pluginsHandler.ServeHTTP(w, r)
+				return
+			}
+			return
+		} else if s.opt.WebUI && webgui.ServePluginWithReferrerOK(w, r, path) {
+			return
+		}
 		// Serve the files
 		r.URL.Path = "/" + path
 		s.files.ServeHTTP(w, r)

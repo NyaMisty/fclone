@@ -1,4 +1,4 @@
-// +build !plan9
+// +build !plan9,!js
 
 package cache
 
@@ -361,15 +361,10 @@ func NewFs(name, rootPath string, m configmap.Mapper) (fs.Fs, error) {
 		return nil, errors.Wrapf(err, "failed to clean root path %q", rootPath)
 	}
 
-	wInfo, wName, wPath, wConfig, err := fs.ConfigFs(opt.Remote)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to parse remote %q to wrap", opt.Remote)
-	}
-
-	remotePath := fspath.JoinRootPath(wPath, rootPath)
-	wrappedFs, wrapErr := wInfo.NewFs(wName, remotePath, wConfig)
+	remotePath := fspath.JoinRootPath(opt.Remote, rootPath)
+	wrappedFs, wrapErr := cache.Get(remotePath)
 	if wrapErr != nil && wrapErr != fs.ErrorIsFile {
-		return nil, errors.Wrapf(wrapErr, "failed to make remote %s:%s to wrap", wName, remotePath)
+		return nil, errors.Wrapf(wrapErr, "failed to make remote %q to wrap", remotePath)
 	}
 	var fsErr error
 	fs.Debugf(name, "wrapped %v:%v at root %v", wrappedFs.Name(), wrappedFs.Root(), rpath)
@@ -390,6 +385,7 @@ func NewFs(name, rootPath string, m configmap.Mapper) (fs.Fs, error) {
 		cleanupChan:      make(chan bool, 1),
 		notifiedRemotes:  make(map[string]bool),
 	}
+	cache.PinUntilFinalized(f.Fs, f)
 	f.rateLimiter = rate.NewLimiter(rate.Limit(float64(opt.Rps)), opt.TotalWorkers)
 
 	f.plexConnector = &plexConnector{}
@@ -1702,17 +1698,20 @@ func (f *Fs) Hashes() hash.Set {
 	return f.Fs.Hashes()
 }
 
-// Purge all files in the root and the root directory
-func (f *Fs) Purge(ctx context.Context) error {
-	fs.Infof(f, "purging cache")
-	f.cache.Purge()
+// Purge all files in the directory
+func (f *Fs) Purge(ctx context.Context, dir string) error {
+	if dir == "" {
+		// FIXME this isn't quite right as it should purge the dir prefix
+		fs.Infof(f, "purging cache")
+		f.cache.Purge()
+	}
 
 	do := f.Fs.Features().Purge
 	if do == nil {
-		return nil
+		return fs.ErrorCantPurge
 	}
 
-	err := do(ctx)
+	err := do(ctx, dir)
 	if err != nil {
 		return err
 	}
@@ -1829,6 +1828,19 @@ func (f *Fs) isRootInPath(p string) bool {
 	return strings.HasPrefix(p, f.Root()+"/")
 }
 
+// MergeDirs merges the contents of all the directories passed
+// in into the first one and rmdirs the other directories.
+func (f *Fs) MergeDirs(ctx context.Context, dirs []fs.Directory) error {
+	do := f.Fs.Features().MergeDirs
+	if do == nil {
+		return errors.New("MergeDirs not supported")
+	}
+	for _, dir := range dirs {
+		_ = f.cache.RemoveDir(dir.Remote())
+	}
+	return do(ctx, dirs)
+}
+
 // DirCacheFlush flushes the dir cache
 func (f *Fs) DirCacheFlush() {
 	_ = f.cache.RemoveDir("")
@@ -1926,4 +1938,5 @@ var (
 	_ fs.UserInfoer     = (*Fs)(nil)
 	_ fs.Disconnecter   = (*Fs)(nil)
 	_ fs.Commander      = (*Fs)(nil)
+	_ fs.MergeDirser    = (*Fs)(nil)
 )

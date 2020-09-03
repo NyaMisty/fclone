@@ -273,6 +273,12 @@ the magic, pretending to be user foo.
     - `gdrive:backup` - use the remote called gdrive, work in
 the folder named backup.
 
+Note: in case you configured a specific root folder on gdrive and rclone is unable to access the contents of that folder when using `--drive-impersonate`, do this instead:
+  - in the gdrive web interface, share your root folder with the user/email of the new Service Account you created/selected at step #1
+  - use rclone without specifying the `--drive-impersonate` option, like this:
+        `rclone -v foo@example.com lsf gdrive:backup`
+
+
 ### Team drives ###
 
 If you want to configure the remote to point to a Google Team Drive
@@ -541,10 +547,8 @@ Here are the standard options specific to drive (Google Drive).
 
 #### --drive-client-id
 
-Google Application Client Id
-Setting your own is recommended.
-See https://rclone.org/drive/#making-your-own-client-id for how to create your own.
-If you leave this blank, it will use an internal key which is low performance.
+OAuth Client Id
+Leave blank normally.
 
 - Config:      client_id
 - Env Var:     RCLONE_DRIVE_CLIENT_ID
@@ -553,8 +557,8 @@ If you leave this blank, it will use an internal key which is low performance.
 
 #### --drive-client-secret
 
-Google Application Client Secret
-Setting your own is recommended.
+OAuth Client Secret
+Leave blank normally.
 
 - Config:      client_secret
 - Env Var:     RCLONE_DRIVE_CLIENT_SECRET
@@ -593,9 +597,6 @@ Leave blank normally.
 Fill in to access "Computers" folders (see docs), or for rclone to use
 a non root folder as its starting point.
 
-Note that if this is blank, the first time rclone runs it will fill it
-in with the ID of the root folder.
-
 
 - Config:      root_folder_id
 - Env Var:     RCLONE_DRIVE_ROOT_FOLDER_ID
@@ -608,14 +609,55 @@ Service Account Credentials JSON file path
 Leave blank normally.
 Needed only if you want use SA instead of interactive login.
 
+Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
+
+
 - Config:      service_account_file
 - Env Var:     RCLONE_DRIVE_SERVICE_ACCOUNT_FILE
 - Type:        string
 - Default:     ""
 
+#### --drive-alternate-export
+
+Deprecated: no longer needed
+
+- Config:      alternate_export
+- Env Var:     RCLONE_DRIVE_ALTERNATE_EXPORT
+- Type:        bool
+- Default:     false
+
 ### Advanced Options
 
 Here are the advanced options specific to drive (Google Drive).
+
+#### --drive-token
+
+OAuth Access Token as a JSON blob.
+
+- Config:      token
+- Env Var:     RCLONE_DRIVE_TOKEN
+- Type:        string
+- Default:     ""
+
+#### --drive-auth-url
+
+Auth server URL.
+Leave blank to use the provider defaults.
+
+- Config:      auth_url
+- Env Var:     RCLONE_DRIVE_AUTH_URL
+- Type:        string
+- Default:     ""
+
+#### --drive-token-url
+
+Token server url.
+Leave blank to use the provider defaults.
+
+- Config:      token_url
+- Env Var:     RCLONE_DRIVE_TOKEN_URL
+- Type:        string
+- Default:     ""
 
 #### --drive-service-account-credentials
 
@@ -710,6 +752,15 @@ This will show trashed files in their original directory structure.
 
 - Config:      trashed_only
 - Env Var:     RCLONE_DRIVE_TRASHED_ONLY
+- Type:        bool
+- Default:     false
+
+#### --drive-starred-only
+
+Only show files that are starred.
+
+- Config:      starred_only
+- Env Var:     RCLONE_DRIVE_STARRED_ONLY
 - Type:        bool
 - Default:     false
 
@@ -809,24 +860,6 @@ Note that if this is used then "root_folder_id" will be ignored.
 - Env Var:     RCLONE_DRIVE_IMPERSONATE
 - Type:        string
 - Default:     ""
-
-#### --drive-alternate-export
-
-Use alternate export URLs for google documents export.,
-
-If this option is set this instructs rclone to use an alternate set of
-export URLs for drive documents.  Users have reported that the
-official export URLs can't export large documents, whereas these
-unofficial ones can.
-
-See rclone issue [#2243](https://github.com/rclone/rclone/issues/2243) for background,
-[this google drive issue](https://issuetracker.google.com/issues/36761333) and
-[this helpful post](https://www.labnol.org/internet/direct-links-for-google-drive/28356/).
-
-- Config:      alternate_export
-- Env Var:     RCLONE_DRIVE_ALTERNATE_EXPORT
-- Type:        bool
-- Default:     false
 
 #### --drive-upload-cutoff
 
@@ -1084,6 +1117,63 @@ Options:
 
 - "target": optional target remote for the shortcut destination
 
+#### drives
+
+List the shared drives available to this account
+
+    rclone backend drives remote: [options] [<arguments>+]
+
+This command lists the shared drives (teamdrives) available to this
+account.
+
+Usage:
+
+    rclone backend drives drive:
+
+This will return a JSON list of objects like this
+
+    [
+        {
+            "id": "0ABCDEF-01234567890",
+            "kind": "drive#teamDrive",
+            "name": "My Drive"
+        },
+        {
+            "id": "0ABCDEFabcdefghijkl",
+            "kind": "drive#teamDrive",
+            "name": "Test Drive"
+        }
+    ]
+
+
+
+#### untrash
+
+Untrash files and directories
+
+    rclone backend untrash remote: [options] [<arguments>+]
+
+This command untrashes all the files and directories in the directory
+passed in recursively.
+
+Usage:
+
+This takes an optional directory to trash which make this easier to
+use via the API.
+
+    rclone backend untrash drive:directory
+    rclone backend -i untrash drive:directory subdir
+
+Use the -i flag to see what would be restored before restoring it.
+
+Result:
+
+    {
+        "Untrashed": 17,
+        "Errors": 0
+    }
+
+
 {{< rem autogenerated options stop >}}
 
 ### Limitations ###
@@ -1200,3 +1290,10 @@ for rclone to be able to get its token-id (but as this only happens during
 the remote configuration, it's not such a big deal). 
 
 (Thanks to @balazer on github for these instructions.)
+
+Sometimes, creation of an OAuth consent in Google API Console fails due to an error message
+“The request failed because changes to one of the field of the resource is not supported”.
+As a convenient workaround, the necessary Google Drive API key can be created on the
+[Python Quickstart](https://developers.google.com/drive/api/v3/quickstart/python) page.
+Just push the Enable the Drive API button to receive the Client ID and Secret.
+Note that it will automatically create a new project in the API Console.

@@ -41,13 +41,15 @@ backends:
    remote:   "TestChunkerChunk3bNometaLocal:"
    fastlist: true
    maxfile:  6k
- - backend:  "chunker"
-   remote:   "TestChunkerMailru:"
-   fastlist: true
- - backend:  "chunker"
-   remote:   "TestChunkerChunk50bMailru:"
-   fastlist: true
-   maxfile:  10k
+ # Disable chunker with mailru tests until Mailru is fixed - see
+ # https://github.com/rclone/rclone/issues/4376
+ # - backend:  "chunker"
+ #   remote:   "TestChunkerMailru:"
+ #   fastlist: true
+ # - backend:  "chunker"
+ #   remote:   "TestChunkerChunk50bMailru:"
+ #   fastlist: true
+ #   maxfile:  10k
  - backend:  "chunker"
    remote:   "TestChunkerChunk50bYandex:"
    fastlist: true
@@ -133,12 +135,15 @@ backends:
      - TestIntegration/FsMkdir/FsEncoding/leading_HT
      - TestIntegration/FsMkdir/FsEncoding/leading_VT
      - TestIntegration/FsMkdir/FsPutFiles/FsPutStream/0
- - backend:  "s3"
-   remote:   "TestS3DigitalOcean:"
-   fastlist: true
-   ignore:
-     - TestIntegration/FsMkdir/FsPutFiles/FsCopy
-     - TestIntegration/FsMkdir/FsPutFiles/SetTier
+ # Disabled due to excessive rate limiting at DO which cause the tests never to pass
+ # This hits the rate limit as documented here: https://www.digitalocean.com/docs/spaces/#limits
+ # 2 COPYs per 5 minutes on any individual object in a Space
+ # - backend:  "s3"
+ #   remote:   "TestS3DigitalOcean:"
+ #   fastlist: true
+ #   ignore:
+ #     - TestIntegration/FsMkdir/FsPutFiles/FsCopy
+ #     - TestIntegration/FsMkdir/FsPutFiles/SetTier
  - backend:  "s3"
    remote:   "TestS3Ceph:"
    fastlist: true
@@ -201,6 +206,8 @@ backends:
  - backend:  "fichier"
    remote:   "TestFichier:"
    fastlist: false
+   tests:
+     - backend
  - backend:  "qingstor"
    remote:   "TestQingStor:"
    fastlist: false

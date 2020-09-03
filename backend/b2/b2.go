@@ -1143,7 +1143,8 @@ func (f *Fs) deleteByID(ctx context.Context, ID, Name string) error {
 // if oldOnly is true then it deletes only non current files.
 //
 // Implemented here so we can make sure we delete old versions.
-func (f *Fs) purge(ctx context.Context, bucket, directory string, oldOnly bool) error {
+func (f *Fs) purge(ctx context.Context, dir string, oldOnly bool) error {
+	bucket, directory := f.split(dir)
 	if bucket == "" {
 		return errors.New("can't purge from root")
 	}
@@ -1218,19 +1219,19 @@ func (f *Fs) purge(ctx context.Context, bucket, directory string, oldOnly bool) 
 	wg.Wait()
 
 	if !oldOnly {
-		checkErr(f.Rmdir(ctx, ""))
+		checkErr(f.Rmdir(ctx, dir))
 	}
 	return errReturn
 }
 
 // Purge deletes all the files and directories including the old versions.
-func (f *Fs) Purge(ctx context.Context) error {
-	return f.purge(ctx, f.rootBucket, f.rootDirectory, false)
+func (f *Fs) Purge(ctx context.Context, dir string) error {
+	return f.purge(ctx, dir, false)
 }
 
 // CleanUp deletes all the hidden files.
 func (f *Fs) CleanUp(ctx context.Context) error {
-	return f.purge(ctx, f.rootBucket, f.rootDirectory, true)
+	return f.purge(ctx, "", true)
 }
 
 // copy does a server side copy from dstObj <- srcObj
@@ -1672,8 +1673,8 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 		opts.RootURL = o.fs.opt.DownloadURL
 	}
 
-	// Download by id if set otherwise by name
-	if o.id != "" {
+	// Download by id if set and not using DownloadURL otherwise by name
+	if o.id != "" && o.fs.opt.DownloadURL == "" {
 		opts.Path += "/b2api/v1/b2_download_file_by_id?fileId=" + urlEncode(o.id)
 	} else {
 		bucket, bucketPath := o.split()

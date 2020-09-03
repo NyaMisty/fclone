@@ -46,7 +46,7 @@ See the [global flags page](/flags/) for global options not listed here.
 * [rclone copyurl](/commands/rclone_copyurl/)	 - Copy url content to dest.
 * [rclone cryptcheck](/commands/rclone_cryptcheck/)	 - Cryptcheck checks the integrity of a crypted remote.
 * [rclone cryptdecode](/commands/rclone_cryptdecode/)	 - Cryptdecode returns unencrypted file names.
-* [rclone dedupe](/commands/rclone_dedupe/)	 - Interactively find duplicate files and delete/rename them.
+* [rclone dedupe](/commands/rclone_dedupe/)	 - Interactively find duplicate filenames and delete/rename them.
 * [rclone delete](/commands/rclone_delete/)	 - Remove the contents of path.
 * [rclone deletefile](/commands/rclone_deletefile/)	 - Remove a single file from remote.
 * [rclone genautocomplete](/commands/rclone_genautocomplete/)	 - Output completion script for a given shell.

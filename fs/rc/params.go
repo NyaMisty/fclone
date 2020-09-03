@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -88,6 +89,40 @@ func (p Params) Get(key string) (interface{}, error) {
 		return nil, ErrParamNotFound(key)
 	}
 	return value, nil
+}
+
+// GetHTTPRequest gets a http.Request parameter associated with the request with the key "_request"
+//
+// If the parameter isn't found then error will be of type
+// ErrParamNotFound and the returned value will be nil.
+func (p Params) GetHTTPRequest() (*http.Request, error) {
+	key := "_request"
+	value, err := p.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	request, ok := value.(*http.Request)
+	if !ok {
+		return nil, ErrParamInvalid{errors.Errorf("expecting http.request value for key %q (was %T)", key, value)}
+	}
+	return request, nil
+}
+
+// GetHTTPResponseWriter gets a http.ResponseWriter parameter associated with the request with the key "_response"
+//
+// If the parameter isn't found then error will be of type
+// ErrParamNotFound and the returned value will be nil.
+func (p Params) GetHTTPResponseWriter() (*http.ResponseWriter, error) {
+	key := "_response"
+	value, err := p.Get(key)
+	if err != nil {
+		return nil, err
+	}
+	request, ok := value.(*http.ResponseWriter)
+	if !ok {
+		return nil, ErrParamInvalid{errors.Errorf("expecting *http.ResponseWriter value for key %q (was %T)", key, value)}
+	}
+	return request, nil
 }
 
 // GetString gets a string parameter from the input
@@ -201,6 +236,13 @@ func (p Params) GetStruct(key string, out interface{}) error {
 	}
 	err = Reshape(out, value)
 	if err != nil {
+		if valueStr, ok := value.(string); ok {
+			// try to unmarshal as JSON if string
+			err = json.Unmarshal([]byte(valueStr), out)
+			if err == nil {
+				return nil
+			}
+		}
 		return ErrParamInvalid{errors.Wrapf(err, "key %q", key)}
 	}
 	return nil

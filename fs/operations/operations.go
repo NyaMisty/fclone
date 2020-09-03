@@ -29,7 +29,6 @@ import (
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/fshttp"
 	"github.com/rclone/rclone/fs/hash"
-	"github.com/rclone/rclone/fs/march"
 	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/lib/atexit"
@@ -207,7 +206,7 @@ func equal(ctx context.Context, src fs.ObjectInfo, dst fs.Object, opt equalOpt) 
 		fs.Debugf(src, "%v differ", ht)
 		return false
 	}
-	if ht == hash.None {
+	if ht == hash.None && !fs.Config.RefreshTimes {
 		// if couldn't check hash, return that they differ
 		return false
 	}
@@ -367,7 +366,7 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 			return nil, accounting.ErrorMaxTransferLimitReachedFatal
 		}
 		if doCopy := f.Features().Copy; doCopy != nil && (SameConfig(src.Fs(), f) || (SameRemoteType(src.Fs(), f) && f.Features().ServerSideAcrossConfigs)) {
-			in := tr.Account(nil) // account the transfer
+			in := tr.Account(ctx, nil) // account the transfer
 			in.ServerSideCopyStart()
 			newDst, err = doCopy(ctx, src, remote)
 			if err == nil {
@@ -422,7 +421,7 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 						dst, err = Rcat(ctx, f, remote, in0, src.ModTime(ctx))
 						newDst = dst
 					} else {
-						in := tr.Account(in0).WithBuffer() // account and buffer the transfer
+						in := tr.Account(ctx, in0).WithBuffer() // account and buffer the transfer
 						var wrappedSrc fs.ObjectInfo = src
 						// We try to pass the original object if possible
 						if src.Remote() != remote {
@@ -726,274 +725,22 @@ func SameDir(fdst, fsrc fs.Info) bool {
 	return fdstRoot == fsrcRoot
 }
 
-// checkIdentical checks to see if dst and src are identical
-//
-// it returns true if differences were found
-// it also returns whether it couldn't be hashed
-func checkIdentical(ctx context.Context, dst, src fs.Object) (differ bool, noHash bool) {
-	same, ht, err := CheckHashes(ctx, src, dst)
-	if err != nil {
-		// CheckHashes will log and count errors
-		return true, false
-	}
-	if ht == hash.None {
-		return false, true
-	}
-	if !same {
-		err = errors.Errorf("%v differ", ht)
-		fs.Errorf(src, "%v", err)
-		_ = fs.CountError(err)
-		return true, false
-	}
-	return false, false
-}
-
-// checkFn is the type of the checking function used in CheckFn()
-type checkFn func(ctx context.Context, a, b fs.Object) (differ bool, noHash bool)
-
-// checkMarch is used to march over two Fses in the same way as
-// sync/copy
-type checkMarch struct {
-	fdst, fsrc      fs.Fs
-	check           checkFn
-	oneway          bool
-	differences     int32
-	noHashes        int32
-	srcFilesMissing int32
-	dstFilesMissing int32
-	matches         int32
-}
-
-// DstOnly have an object which is in the destination only
-func (c *checkMarch) DstOnly(dst fs.DirEntry) (recurse bool) {
-	switch dst.(type) {
-	case fs.Object:
-		if c.oneway {
-			return false
-		}
-		err := errors.Errorf("File not in %v", c.fsrc)
-		fs.Errorf(dst, "%v", err)
-		_ = fs.CountError(err)
-		atomic.AddInt32(&c.differences, 1)
-		atomic.AddInt32(&c.srcFilesMissing, 1)
-	case fs.Directory:
-		// Do the same thing to the entire contents of the directory
-		if c.oneway {
-			return false
-		}
-		return true
-	default:
-		panic("Bad object in DirEntries")
-	}
-	return false
-}
-
-// SrcOnly have an object which is in the source only
-func (c *checkMarch) SrcOnly(src fs.DirEntry) (recurse bool) {
-	switch src.(type) {
-	case fs.Object:
-		err := errors.Errorf("File not in %v", c.fdst)
-		fs.Errorf(src, "%v", err)
-		_ = fs.CountError(err)
-		atomic.AddInt32(&c.differences, 1)
-		atomic.AddInt32(&c.dstFilesMissing, 1)
-	case fs.Directory:
-		// Do the same thing to the entire contents of the directory
-		return true
-	default:
-		panic("Bad object in DirEntries")
-	}
-	return false
-}
-
-// check to see if two objects are identical using the check function
-func (c *checkMarch) checkIdentical(ctx context.Context, dst, src fs.Object) (differ bool, noHash bool) {
-	var err error
-	tr := accounting.Stats(ctx).NewCheckingTransfer(src)
-	defer func() {
-		tr.Done(err)
-	}()
-	if sizeDiffers(src, dst) {
-		err = errors.Errorf("Sizes differ")
-		fs.Errorf(src, "%v", err)
-		return true, false
-	}
-	if fs.Config.SizeOnly {
-		return false, false
-	}
-	return c.check(ctx, dst, src)
-}
-
-// Match is called when src and dst are present, so sync src to dst
-func (c *checkMarch) Match(ctx context.Context, dst, src fs.DirEntry) (recurse bool) {
-	switch srcX := src.(type) {
-	case fs.Object:
-		dstX, ok := dst.(fs.Object)
-		if ok {
-			differ, noHash := c.checkIdentical(ctx, dstX, srcX)
-			if differ {
-				atomic.AddInt32(&c.differences, 1)
-			} else {
-				atomic.AddInt32(&c.matches, 1)
-				if noHash {
-					atomic.AddInt32(&c.noHashes, 1)
-					fs.Debugf(dstX, "OK - could not check hash")
-				} else {
-					fs.Debugf(dstX, "OK")
-				}
-			}
-		} else {
-			err := errors.Errorf("is file on %v but directory on %v", c.fsrc, c.fdst)
-			fs.Errorf(src, "%v", err)
-			_ = fs.CountError(err)
-			atomic.AddInt32(&c.differences, 1)
-			atomic.AddInt32(&c.dstFilesMissing, 1)
-		}
-	case fs.Directory:
-		// Do the same thing to the entire contents of the directory
-		_, ok := dst.(fs.Directory)
-		if ok {
-			return true
-		}
-		err := errors.Errorf("is file on %v but directory on %v", c.fdst, c.fsrc)
-		fs.Errorf(dst, "%v", err)
-		_ = fs.CountError(err)
-		atomic.AddInt32(&c.differences, 1)
-		atomic.AddInt32(&c.srcFilesMissing, 1)
-
-	default:
-		panic("Bad object in DirEntries")
-	}
-	return false
-}
-
-// CheckFn checks the files in fsrc and fdst according to Size and
-// hash using checkFunction on each file to check the hashes.
-//
-// checkFunction sees if dst and src are identical
-//
-// it returns true if differences were found
-// it also returns whether it couldn't be hashed
-func CheckFn(ctx context.Context, fdst, fsrc fs.Fs, check checkFn, oneway bool) error {
-	c := &checkMarch{
-		fdst:   fdst,
-		fsrc:   fsrc,
-		check:  check,
-		oneway: oneway,
-	}
-
-	// set up a march over fdst and fsrc
-	m := &march.March{
-		Ctx:      ctx,
-		Fdst:     fdst,
-		Fsrc:     fsrc,
-		Dir:      "",
-		Callback: c,
-	}
-	fs.Debugf(fdst, "Waiting for checks to finish")
-	err := m.Run()
-
-	if c.dstFilesMissing > 0 {
-		fs.Logf(fdst, "%d files missing", c.dstFilesMissing)
-	}
-	if c.srcFilesMissing > 0 {
-		fs.Logf(fsrc, "%d files missing", c.srcFilesMissing)
-	}
-
-	fs.Logf(fdst, "%d differences found", c.differences)
-	if errs := accounting.Stats(ctx).GetErrors(); errs > 0 {
-		fs.Logf(fdst, "%d errors while checking", errs)
-	}
-	if c.noHashes > 0 {
-		fs.Logf(fdst, "%d hashes could not be checked", c.noHashes)
-	}
-	if c.matches > 0 {
-		fs.Logf(fdst, "%d matching files", c.matches)
-	}
-	if c.differences > 0 {
-		return errors.Errorf("%d differences found", c.differences)
-	}
-	return err
-}
-
-// Check the files in fsrc and fdst according to Size and hash
-func Check(ctx context.Context, fdst, fsrc fs.Fs, oneway bool) error {
-	return CheckFn(ctx, fdst, fsrc, checkIdentical, oneway)
-}
-
-// CheckEqualReaders checks to see if in1 and in2 have the same
-// content when read.
-//
-// it returns true if differences were found
-func CheckEqualReaders(in1, in2 io.Reader) (differ bool, err error) {
-	const bufSize = 64 * 1024
-	buf1 := make([]byte, bufSize)
-	buf2 := make([]byte, bufSize)
-	for {
-		n1, err1 := readers.ReadFill(in1, buf1)
-		n2, err2 := readers.ReadFill(in2, buf2)
-		// check errors
-		if err1 != nil && err1 != io.EOF {
-			return true, err1
-		} else if err2 != nil && err2 != io.EOF {
-			return true, err2
-		}
-		// err1 && err2 are nil or io.EOF here
-		// process the data
-		if n1 != n2 || !bytes.Equal(buf1[:n1], buf2[:n2]) {
-			return true, nil
-		}
-		// if both streams finished the we have finished
-		if err1 == io.EOF && err2 == io.EOF {
+// Retry runs fn up to maxTries times if it returns a retriable error
+func Retry(o interface{}, maxTries int, fn func() error) (err error) {
+	for tries := 1; tries <= maxTries; tries++ {
+		// Call the function which might error
+		err = fn()
+		if err == nil {
 			break
 		}
-	}
-	return false, nil
-}
-
-// CheckIdentical checks to see if dst and src are identical by
-// reading all their bytes if necessary.
-//
-// it returns true if differences were found
-func CheckIdentical(ctx context.Context, dst, src fs.Object) (differ bool, err error) {
-	in1, err := dst.Open(ctx)
-	if err != nil {
-		return true, errors.Wrapf(err, "failed to open %q", dst)
-	}
-	tr1 := accounting.Stats(ctx).NewTransfer(dst)
-	defer func() {
-		tr1.Done(err)
-	}()
-	in1 = tr1.Account(in1).WithBuffer() // account and buffer the transfer
-
-	in2, err := src.Open(ctx)
-	if err != nil {
-		return true, errors.Wrapf(err, "failed to open %q", src)
-	}
-	tr2 := accounting.Stats(ctx).NewTransfer(dst)
-	defer func() {
-		tr2.Done(err)
-	}()
-	in2 = tr2.Account(in2).WithBuffer() // account and buffer the transfer
-
-	// To assign err variable before defer.
-	differ, err = CheckEqualReaders(in1, in2)
-	return
-}
-
-// CheckDownload checks the files in fsrc and fdst according to Size
-// and the actual contents of the files.
-func CheckDownload(ctx context.Context, fdst, fsrc fs.Fs, oneway bool) error {
-	check := func(ctx context.Context, a, b fs.Object) (differ bool, noHash bool) {
-		differ, err := CheckIdentical(ctx, a, b)
-		if err != nil {
-			err = fs.CountError(err)
-			fs.Errorf(a, "Failed to download: %v", err)
-			return true, true
+		// Retry if err returned a retry error
+		if fserrors.IsRetryError(err) || fserrors.ShouldRetry(err) {
+			fs.Debugf(o, "Received error: %v - low level retry %d/%d", err, tries, maxTries)
+			continue
 		}
-		return differ, false
+		break
 	}
-	return CheckFn(ctx, fdst, fsrc, check, oneway)
+	return err
 }
 
 // ListFn lists the Fs to the supplied function
@@ -1174,20 +921,16 @@ func Rmdir(ctx context.Context, f fs.Fs, dir string) error {
 }
 
 // Purge removes a directory and all of its contents
-func Purge(ctx context.Context, f fs.Fs, dir string) error {
+func Purge(ctx context.Context, f fs.Fs, dir string) (err error) {
 	doFallbackPurge := true
-	var err error
-	if dir == "" {
-		// FIXME change the Purge interface so it takes a dir - see #1891
-		if doPurge := f.Features().Purge; doPurge != nil {
-			doFallbackPurge = false
-			if SkipDestructive(ctx, fs.LogDirName(f, dir), "purge directory") {
-				return nil
-			}
-			err = doPurge(ctx)
-			if err == fs.ErrorCantPurge {
-				doFallbackPurge = true
-			}
+	if doPurge := f.Features().Purge; doPurge != nil {
+		doFallbackPurge = false
+		if SkipDestructive(ctx, fs.LogDirName(f, dir), "purge directory") {
+			return nil
+		}
+		err = doPurge(ctx, dir)
+		if err == fs.ErrorCantPurge {
+			doFallbackPurge = true
 		}
 	}
 	if doFallbackPurge {
@@ -1307,7 +1050,7 @@ func Cat(ctx context.Context, f fs.Fs, w io.Writer, offset, count int64) error {
 		if count >= 0 {
 			in = &readCloser{Reader: &io.LimitedReader{R: in, N: count}, Closer: in}
 		}
-		in = tr.Account(in).WithBuffer() // account and buffer the transfer
+		in = tr.Account(ctx, in).WithBuffer() // account and buffer the transfer
 		// take the lock just before we output stuff, so at the last possible moment
 		mu.Lock()
 		defer mu.Unlock()
@@ -1325,7 +1068,7 @@ func Rcat(ctx context.Context, fdst fs.Fs, dstFileName string, in io.ReadCloser,
 	defer func() {
 		tr.Done(err)
 	}()
-	in = tr.Account(in).WithBuffer()
+	in = tr.Account(ctx, in).WithBuffer()
 
 	readCounter := readers.NewCountingReader(in)
 	var trackingIn io.Reader
@@ -1673,7 +1416,7 @@ func RcatSize(ctx context.Context, fdst fs.Fs, dstFileName string, in io.ReadClo
 			tr.Done(err)
 		}()
 		body := ioutil.NopCloser(in) // we let the server close the body
-		in := tr.Account(body)       // account the transfer (no buffering)
+		in := tr.Account(ctx, body)  // account the transfer (no buffering)
 
 		if SkipDestructive(ctx, dstFileName, "upload from pipe") {
 			// prevents "broken pipe" errors
