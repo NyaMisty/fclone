@@ -18,6 +18,7 @@ import (
 	"math/rand"
 	"mime"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -982,11 +983,6 @@ func (f *Fs) DirCache() *dircache.DirCache {
 func (f *Fs) shouldRetry(err error) (bool, error) {
 
 	if err == nil {
-		// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
-		// 	f.svc = s
-		// 	// f.pacer = newPacer(&f.opt)
-		// }
-
 		return false, nil
 	}
 	if fserrors.ShouldRetry(err) {
@@ -1002,7 +998,7 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 			reason := gerr.Errors[0].Reason
 			// fs.Logf(nil, "Retry: %s", reason)
 			message := gerr.Errors[0].Message
-			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" || (reason == "dailyLimitExceededUnreg" || strings.HasPrefix(message, "Daily Limit for Unauthenticated Use Exceeded")) {
+			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" || (reason == "dailyLimitExceededUnreg" || strings.HasPrefix(message, "Daily Limit")) {
 				// DriveMod: change service account
 				// if f.hasSA() {
 				f.saMu.Lock()
@@ -1061,15 +1057,6 @@ func (f *Fs) GetFile(ID string, fields googleapi.Field) (info *drive.File, err e
 // getFile returns drive.File for the ID passed and fields passed in
 func (f *Fs) getFile(ID string, fields googleapi.Field) (info *drive.File, err error) {
 	err = f.pacer.CallNoRetry(func() (bool, error) {
-		// DriveMod
-		// svc := f.svc
-		// f.ServiceAccountPool.Mutex.Lock()
-		// if u, err := f.ServiceAccountPool.GetUnit(true, false); err == nil {
-		// 	fs.Infof(nil, "Service Changed (Create): %s", u.File)
-		// 	svc = u.svc
-		// }
-		// f.ServiceAccountPool.Mutex.Unlock()
-
 		info, err = f.svc.Files.Get(ID).
 			Fields(fields).
 			SupportsAllDrives(true).
@@ -1489,7 +1476,7 @@ func newFs(name, path string, m configmap.Mapper) (*Fs, error) {
 	err := configstruct.Set(m, opt)
 
 	// DriveMod: parse object id from path remote:{ID}
-	isFileID := false
+	// isFileID := false
 	if path != "" && path[0:1] == "{" && strings.Contains(path, "}") {
 		idIndex := strings.Index(path, "}")
 		if idIndex > 0 {
@@ -1501,7 +1488,7 @@ func newFs(name, path string, m configmap.Mapper) (*Fs, error) {
 				fs.Debugf(nil, "Root ID detected: %s", rootID)
 				//opt.ServerSideAcrossConfigs = true
 				if len(rootID) == 33 || len(rootID) == 28 {
-					isFileID = true
+					// isFileID = true
 					opt.RootFolderID = rootID
 				} else {
 					opt.RootFolderID = rootID
@@ -1645,8 +1632,8 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	}
 
 	// DriveMod: confirm the object ID is file
-	if isFileID {
-		file, err := f.svc.Files.Get(opt.RootFolderID).Fields("name", "id", "size", "mimeType").SupportsAllDrives(true).Do()
+	if len(f.rootFolderID) == 33 || len(f.rootFolderID) == 28 {
+		file, err := f.svc.Files.Get(f.rootFolderID).Fields("name", "id", "size", "mimeType").SupportsAllDrives(true).Do()
 		if err == nil {
 			//fmt.Println("file.MimeType", file.MimeType)
 			if "application/vnd.google-apps.folder" != file.MimeType && file.MimeType != "" {
@@ -1948,39 +1935,25 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 // if parent is not exists, it returns an error
 //* DriveMod
 func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err error) {
-	// st := time.Now()
-	// defer func() {
-	// fs.Errorf(nil, "Drive::CreateLeafDir (%.1fs)", time.Now().Sub(st).Seconds())
-	// }()
-	err = f.dirCache.FindRoot(ctx, true)
+	parentID, err := f.dirCache.RootID(ctx, false)
 	if err != nil {
-		return
+		return "", err
 	}
-	// root
+
+	// root	
 	if dir == "" {
-		return f.dirCache.RootID(), err
+		return parentID, err
 	}
 
 	// check if exists
-	// newID, err = f.dirCache.FindDir(ctx, dir, false)
-	// if err == nil {
-	// return
-	// }
 	newID, ok := f.dirCache.Get(dir)
 	if ok {
 		return newID, nil
 	}
 
-	parentID := f.dirCache.RootID()
-
 	parent, leaf := dircache.SplitPath(dir)
 	if parent != "" {
 		// Find parent
-		// parentID, err = f.dirCache.FindDir(ctx, parent, false)
-		// if err != nil {
-		// 	err = fs.ErrorDirNotFound
-		// 	return
-		// }
 		parentID, ok = f.dirCache.Get(parent)
 		if !ok {
 			return "", fs.ErrorDirNotFound
@@ -3069,7 +3042,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		svc := f.svc
 		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
 			svc = s
-			f.pacer = newPacer(&f.opt)
+			f.pacer = fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(f.opt.PacerMinSleep), pacer.Burst(f.opt.PacerBurst)))
 		}
 
 		info, err = svc.Files.Copy(id, createInfo).
@@ -3447,7 +3420,6 @@ func (f *Fs) changeNotifyStartPageToken() (pageToken string, err error) {
 		svc := f.svc
 		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
 			svc = s
-			// f.pacer = newPacer(&f.opt)
 		}
 
 		changes := svc.Changes.GetStartPageToken().SupportsAllDrives(true)
@@ -3604,26 +3576,10 @@ func (f *Fs) hasSA() bool {
 	return true
 }
 
-// DriveMod:
-// func (f *Fs) canChangeSA() bool {
-// 	now := time.Now()
-// 	if time.Time(f.lastChangeSATime).IsZero() {
-// 		return true
-// 	}
-
-// 	if now.Sub(f.lastChangeSATime).Milliseconds() < 50 {
-// 		fs.Infof(f, "Not allow change service account error: too fast")
-// 		return false
-// 	}
-// 	return true
-// }
-
 // DriveMod: changeServiceAccount change service account from list
 // Read json from folder if empty.
 func (f *Fs) changeServiceAccount(reason string, remove bool) (err error) {
 	opt := &f.opt
-
-	// f.ServiceAccountPool.Mutex.Lock()
 
 	// Load
 	if f.ServiceAccountPool.Size() == 0 {
@@ -3952,6 +3908,7 @@ Usage:
 	Opts: map[string]string{
 		"separator": `Separator for the items in the format. (default "[TAB]")`,
 	},
+}, {
 	Name:  "drives",
 	Short: "List the shared drives available to this account",
 	Long: `This command lists the shared drives (teamdrives) available to this

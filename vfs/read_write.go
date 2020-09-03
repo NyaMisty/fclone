@@ -230,13 +230,6 @@ func (fh *RWFileHandle) Size() int64 {
 	return fh._size()
 }
 
-// Size returns the size of the underlying file
-func (fh *RWFileHandle) Size() int64 {
-	fh.mu.Lock()
-	defer fh.mu.Unlock()
-	return fh._size()
-}
-
 // Stat returns info about the file
 func (fh *RWFileHandle) Stat() (os.FileInfo, error) {
 	fh.mu.Lock()
