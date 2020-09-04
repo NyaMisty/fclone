@@ -30,6 +30,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
@@ -252,7 +253,7 @@ a non root folder as its starting point.
 			Default:  maxServices,
 			Help:     "Max service account's drive service stored on memory",
 			Hide:     fs.OptionHideConfigurator,
-			Advanced: true,
+			Advanced: true,			
 		}, {
 			Name:     "service_account_credentials",
 			Help:     "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -1446,15 +1447,15 @@ func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
 func parseRootID(s string) (rootID string, err error) {
 	re := regexp.MustCompile(`\{([^}]{5,})\}`)
 	m := re.FindStringSubmatch(s)
-	if m == nil {
+	if m == nil{
 		return "", errors.Errorf("%s doesn't not contain valid id", s)
-	}
+	}	
 	rootID = m[1]
 
 	if strings.HasPrefix(rootID, "http") {
 		// folders - https://drive.google.com/drive/u/0/folders/
 		// file - https://drive.google.com/file/d/
-		re := regexp.MustCompile(`\/(folders|files|file\/d)(\/([A-Za-z0-9_-]{6,}))+\/?`)
+		re :=   regexp.MustCompile(`\/(folders|files|file\/d)(\/([A-Za-z0-9_-]{6,}))+\/?`)
 		if m := re.FindStringSubmatch(rootID); m != nil {
 			rootID = m[len(m)-1]
 			return
@@ -1468,7 +1469,7 @@ func parseRootID(s string) (rootID string, err error) {
 		}
 	}
 
-	return
+	return 
 }
 
 // newFs partially constructs Fs from the path
@@ -1480,14 +1481,15 @@ func newFs(name, path string, m configmap.Mapper) (*Fs, error) {
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
 
-	// DriveMod: parse object id from path remote:{ID}
-	if rootID, _ := parseRootID(path); len(rootID) > 6 {
-		// fs.Debugf(nil, "Root ID detected: %s", rootID)
-		name += rootID
-		// opt.RootFolderID = rootID
-		path = path[strings.Index(path, "}")+1:]
-	}
+		// DriveMod: parse object id from path remote:{ID}
+		if rootID, _ := parseRootID(path); len(rootID) >6 {				
+			// fs.Debugf(nil, "Root ID detected: %s", rootID)
+			name += rootID
+			// opt.RootFolderID = rootID
+			path = path[strings.Index(path, "}")+1:]
+		}
 
+		
 	if err != nil {
 		return nil, err
 	}
@@ -1581,7 +1583,7 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	// DriveMod: parse object id from path remote:{ID}
 	// isFileID := false
 	var srcFile *drive.File
-	if rootID, _ := parseRootID(path); len(rootID) > 6 {
+	if rootID, _ := parseRootID(path); len(rootID) >6 {		
 
 		err = f.pacer.Call(func() (bool, error) {
 			srcFile, err = f.svc.Files.Get(rootID).
@@ -1590,16 +1592,16 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 				Do()
 			return f.shouldRetry(err)
 		})
-		if err == nil {
-			if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder" {
+		if err == nil{
+			if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder"{
 				fs.Debugf(nil, "Root ID (File): %s", rootID)
-				f.opt.RootFolderID = rootID
-			} else {
+				f.opt.RootFolderID = rootID				
+			}else{
 				if srcFile.DriveId == rootID {
 					fs.Debugf(nil, "Root ID (Drive): %s", rootID)
 					f.opt.RootFolderID = ""
-					f.opt.TeamDriveID = rootID
-				} else {
+					f.opt.TeamDriveID = rootID					
+				}else{
 					fs.Debugf(nil, "Root ID (Folder): %s", rootID)
 					f.opt.RootFolderID = rootID
 				}
@@ -1608,6 +1610,7 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 			f.isTeamDrive = f.opt.TeamDriveID != ""
 		}
 	}
+
 
 	// Set the root folder ID
 	if f.opt.RootFolderID != "" {
@@ -1653,18 +1656,39 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 
 	// DriveMod: confirm the object ID is file
 	if srcFile != nil {
-		tempF := *f
-		newRoot := ""
-		tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
-		tempF.root = newRoot
-		f.dirCache = tempF.dirCache
-		f.root = tempF.root
+		// if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder"{
+			tempF := *f
+			newRoot := ""
+			tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
+			tempF.root = newRoot
+			f.dirCache = tempF.dirCache
+			f.root = tempF.root
 
-		extension, exportName, exportMimeType, isDocument := f.findExportFormat(srcFile)
-		obj, _ := f.newObjectWithExportInfo(srcFile.Name, srcFile, extension, exportName, exportMimeType, isDocument)
-		f.root = "isFile:" + srcFile.Name
-		f.FileObj = &obj
-		return f, fs.ErrorIsFile
+			extension, exportName, exportMimeType, isDocument := f.findExportFormat(srcFile)
+			obj, _ := f.newObjectWithExportInfo(srcFile.Name, srcFile, extension, exportName, exportMimeType, isDocument)
+			f.root = "isFile:" + srcFile.Name
+			f.FileObj = &obj
+			return f, fs.ErrorIsFile
+		// }
+
+		// file, err := f.svc.Files.Get(f.rootFolderID).Fields("name", "id", "size", "mimeType").SupportsAllDrives(true).Do()
+		// if err == nil {
+		// 	//fmt.Println("file.MimeType", file.MimeType)
+		// 	if  != file.MimeType && file.MimeType != "" {
+		// 		tempF := *f
+		// 		newRoot := ""
+		// 		tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
+		// 		tempF.root = newRoot
+		// 		f.dirCache = tempF.dirCache
+		// 		f.root = tempF.root
+
+		// 		extension, exportName, exportMimeType, isDocument := f.findExportFormat(file)
+		// 		obj, _ := f.newObjectWithExportInfo(file.Name, file, extension, exportName, exportMimeType, isDocument)
+		// 		f.root = "isFile:" + file.Name
+		// 		f.FileObj = &obj
+		// 		return f, fs.ErrorIsFile
+		// 	}
+		// }
 	}
 
 	// Find the current root
@@ -1954,7 +1978,7 @@ func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err e
 		return "", err
 	}
 
-	// root
+	// root	
 	if dir == "" {
 		return parentID, err
 	}
@@ -3729,6 +3753,189 @@ func (f *Fs) listTeamDrives(ctx context.Context) (drives []*drive.TeamDrive, err
 	return drives, nil
 }
 
+// Create new shared drive and clone permission from srcFs
+func (f *Fs) addDrive(ctx context.Context, name string, srcFs *Fs, replaceMembers bool) (newDrive *drive.Drive, err error) {
+
+	// Get permissions from src
+	var srcPerms []*drive.Permission
+	if srcFs != nil {
+		srcPerms, err = f.getPermissions(ctx, f, srcFs.opt.TeamDriveID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Create drive
+	createInfo := &drive.Drive{
+		Name:   name,
+		Hidden: false,
+	}
+
+	requestID := uuid.New()
+	err = f.pacer.Call(func() (bool, error) {
+		newDrive, err = f.svc.Drives.Create(requestID.String(), createInfo).
+			Do()
+		return f.shouldRetry(err)
+	})
+	if err != nil {
+		return nil, err
+	}
+	fs.Logf(nil, "Created new shared drive: %s (%s)", newDrive.Name, newDrive.Id)
+
+	// Add permissions
+	if len(srcPerms) > 0 {
+		fs.Infof(nil, "Copying %d members", len(srcPerms))
+
+		added := make(map[string]struct{})
+		for _, srcPerm := range srcPerms {
+			added[srcPerm.EmailAddress] = struct{}{}
+
+			createInfo := &drive.Permission{
+				// DisplayName:       srcPerm.DisplayName,
+				EmailAddress:      srcPerm.EmailAddress,
+				Domain:            srcPerm.Domain,
+				ExpirationTime:    srcPerm.ExpirationTime,
+				PermissionDetails: srcPerm.PermissionDetails,
+				Role:              srcPerm.Role,
+				Type:              srcPerm.Type,
+			}
+
+			var perm *drive.Permission
+			err = f.pacer.Call(func() (bool, error) {
+				perm, err = f.svc.Permissions.Create(newDrive.Id, createInfo).
+					SupportsAllDrives(true).
+					SendNotificationEmail(false).
+					Fields("*").
+					Do()
+				return f.shouldRetry(err)
+			})
+			if err != nil {
+				fs.Errorf(nil, "Couldn't add member (%s): %v", srcPerm.EmailAddress, err)
+			} else {
+				fs.Infof(nil, "Added %s (%s) to shared drive", perm.EmailAddress, perm.Role)
+			}
+		}
+
+		if replaceMembers {
+			fs.Infof(nil, "Removing unwanted members")
+			perms, err := f.getPermissions(ctx, f, newDrive.Id)
+			if err != nil {
+				return nil, err
+			}
+			for _, perm := range perms {
+				if _, ok := added[perm.EmailAddress]; ok {
+					continue
+				}
+				err = f.pacer.Call(func() (bool, error) {
+					err = f.svc.Permissions.Delete(newDrive.Id, perm.Id).
+						SupportsAllDrives(true).
+						Fields("*").
+						Do()
+					return f.shouldRetry(err)
+				})
+				if err != nil {
+					fs.Errorf(nil, "Couldn't delete unwanted member (%s): %v", perm.EmailAddress, err)
+				} else {
+					fs.Infof(nil, "Removed %s (%s) from shared drive", perm.EmailAddress, perm.Role)
+				}
+			}
+		}
+	}
+
+	return newDrive, nil
+}
+
+// Delete shared drive
+func (f *Fs) deleteDrive(ctx context.Context, force bool) (err error) {
+	driveID := f.opt.TeamDriveID
+	if driveID == "" {
+		return errors.Errorf("Invalid team drive id", err)
+	}
+
+	// Get drive
+	var target *drive.Drive
+	err = f.pacer.Call(func() (bool, error) {
+		target, err = f.svc.Drives.Get(driveID).
+			Context(ctx).
+			Fields("*").
+			Do()
+		return f.shouldRetry(err)
+	})
+	if err != nil {
+		return errors.Errorf("Couldn't fetch shared drive: %v", err)
+	}
+
+	if !force {
+		perms, err := f.getPermissions(ctx, f, driveID)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Confirm to delete shared drive?\n")
+		fmt.Println("--------------------------------")
+		fmt.Printf("Name    : %s\n", target.Name)
+		fmt.Printf("ID      : %s\n", target.Id)
+		fmt.Printf("Created : %s\n", target.CreatedTime)
+		fmt.Printf("Members : \n")
+		if len(perms) > 0 {
+			for _, perm := range perms {
+				switch perm.Role {
+				case "owner", "organizer", "fileOrganizer":
+					fmt.Printf("- %-12s\t%s\n", perm.Role, perm.EmailAddress)
+				default:
+				}
+			}
+		}
+		fmt.Println("--------------------------------")
+		if !config.Confirm(false) {
+			return nil
+		}
+	}
+
+	// Delete drive
+	err = f.pacer.Call(func() (bool, error) {
+		err = f.svc.Drives.Delete(driveID).
+			Context(ctx).
+			Do()
+		return f.shouldRetry(err)
+	})
+	if err != nil {
+		return errors.Errorf("Couldn't delete shared drive (%s): %v", driveID, err)
+	}
+	fs.Infof(nil, "Deleted shared drive: %s (%s)", target.Name, target.Id)
+	return err
+}
+
+func (f *Fs) getPermissions(ctx context.Context, srcFs *Fs, id string) (perms []*drive.Permission, err error) {
+	list := srcFs.svc.Permissions.List(id).
+		PageSize(100).
+		Fields("*").
+		SupportsAllDrives(true)
+
+	for {
+		var permissions *drive.PermissionList
+		err = f.pacer.Call(func() (bool, error) {
+			permissions, err = list.Context(ctx).Do()
+			return f.shouldRetry(err)
+		})
+		if err != nil {
+			return nil, errors.Errorf("Couldn't get permissions for item (%s): %v\n", id, err)
+		}
+		for _, perm := range permissions.Permissions {
+			if perm.Deleted {
+				continue
+			}
+			perms = append(perms, perm)
+		}
+		if permissions.NextPageToken == "" {
+			break
+		}
+		list.PageToken(permissions.NextPageToken)
+	}
+
+	return perms, err
+}
+
 type unTrashResult struct {
 	Untrashed int
 	Errors    int
@@ -3848,6 +4055,37 @@ authenticated with "drive2:" can't read files from "drive:".
 `,
 	Opts: map[string]string{
 		"target": "optional target remote for the shortcut destination",
+	},
+}, {
+	Name:  "add-drive",
+	Short: "Add new shared drive",
+	Long: `This command add new shared drive and clone permissions (members and roles) if provided.
+
+Usage:
+
+	rclone backend add-drive drive: NewDriveName
+	rclone backend add-drive drive: NewDriveName -o copy-members=shared-drive:
+	rclone backend add-drive drive: NewDriveName -o replace-members=shared-drive:
+`,
+	Opts: map[string]string{
+		"copy-members":    `Copy members from target shared drive to new shared drive`,
+		"replace-members": `Replace members instead of copy`,
+	},
+}, {
+	Name:  "delete-drive",
+	Short: "Delete shared drive",
+	Long: `This command delete shared drive (cannot delete drive with untrashed files).
+	
+Usage:
+	
+	rclone backend delete-drive drive:
+	rclone backend delete-drive drive:{0123ABCDEF-6Uk9PVA}
+	rclone backend delete-drive drive: -o force
+		
+User's confirmation is needed before deleteing.
+	`,
+	Opts: map[string]string{
+		"force": `Delete shared drive without confirmation`,
 	},
 }, {
 	Name:  "lsdrives",
@@ -3975,6 +4213,54 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 			}
 		}
 		return f.makeShortcut(ctx, arg[0], dstFs, arg[1])
+	case "add-drive":
+		if len(arg) != 1 {
+			return nil, errors.New("need exactly 1 arguments")
+		}
+
+		var remote string
+		var replaceMembers bool
+		if val, ok := opt["replace-members"]; ok {
+			replaceMembers = true
+			remote = val
+		} else if val, ok := opt["copy-members"]; ok {
+			// copyMembers = true
+			remote = val
+		}
+
+		var srcFs *Fs
+		if remote != "" {
+			targetFs, err := cache.Get(remote)
+			if err != nil {
+				return nil, errors.Wrap(err, "couldn't find target remote")
+			}
+
+			var ok bool
+			srcFs, ok = targetFs.(*Fs)
+			if !ok {
+				return nil, errors.New("target is not a drive backend")
+			}
+			if !srcFs.isTeamDrive {
+				return nil, errors.New("targetis not a shared drive")
+			}
+		}
+
+		_, err = f.addDrive(ctx, arg[0], srcFs, replaceMembers)
+		return nil, err
+	case "delete-drive":
+		if len(arg) > 0 {
+			return nil, errors.New("no argument is needed")
+		}
+
+		if !f.isTeamDrive {
+			return nil, errors.New("it is not a shared drive")
+		}
+		force := false
+		if _, ok := opt["force"]; ok {
+			force = true
+		}
+		return nil, f.deleteDrive(ctx, force)
+
 	case "lsdrives":
 		if len(arg) >= 1 {
 			return nil, errors.New("no arguments needed")
