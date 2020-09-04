@@ -21,6 +21,7 @@ require (
 	github.com/dropbox/dropbox-sdk-go-unofficial v5.6.0+incompatible
 	github.com/gogo/protobuf v1.3.1 // indirect
 	github.com/google/go-querystring v1.0.0 // indirect
+	github.com/google/uuid v1.1.1
 	github.com/hanwen/go-fuse/v2 v2.0.3
 	github.com/jlaffaye/ftp v0.0.0-20200720194710-13949d38913e
 	github.com/jzelinskie/whirlpool v0.0.0-20170603002051-c19460b8caa6

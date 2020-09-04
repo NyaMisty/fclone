@@ -267,10 +267,10 @@ func (s *StatsInfo) String() string {
 		_, _ = fmt.Fprintf(buf, "\nTransferred:   	")
 	} else {
 		xfrchk := []string{}
-		if totalTransfer > 0 && s.transferQueue > 0 {
+		if totalTransfer > 0 { // && s.transferQueue > 0 {
 			xfrchk = append(xfrchk, fmt.Sprintf("xfr#%d/%d", s.transfers, totalTransfer))
 		}
-		if totalChecks > 0 && s.checkQueue > 0 {
+		if totalChecks > 0 { // && s.checkQueue > 0 {
 			xfrchk = append(xfrchk, fmt.Sprintf("chk#%d/%d", s.checks, totalChecks))
 		}
 		if len(xfrchk) > 0 {

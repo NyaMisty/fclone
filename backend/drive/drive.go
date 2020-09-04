@@ -78,11 +78,11 @@ const (
 	listRGrouping    = 50   // number of IDs to search at once when using ListR
 	listRInputBuffer = 1000 // size of input buffer when using ListR
 
-	// DriveMod
-	defaultSAMinSleep      = fs.Duration(10 * time.Millisecond)
+	// Mod
+	defaultSAMinSleep      = fs.Duration(100 * time.Millisecond)
 	maxServices            = 100
 	defaltPreloadServices  = 50
-	defaultSAPacerMinSleep = fs.Duration(10 * time.Millisecond)
+	defaultSAPacerMinSleep = fs.Duration(50 * time.Millisecond)
 )
 
 // Globals
@@ -253,7 +253,7 @@ a non root folder as its starting point.
 			Default:  maxServices,
 			Help:     "Max service account's drive service stored on memory",
 			Hide:     fs.OptionHideConfigurator,
-			Advanced: true,			
+			Advanced: true,
 		}, {
 			Name:     "service_account_credentials",
 			Help:     "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -570,30 +570,31 @@ type Options struct {
 
 // Fs represents a remote drive server
 type Fs struct {
-	name             string             // name of this remote
-	root             string             // the path we are working on
-	opt              Options            // parsed options
-	features         *fs.Features       // optional features
-	svc              *drive.Service     // the connection to the drive server
-	v2Svc            *drive_v2.Service  // used to create download links for the v2 api
-	client           *http.Client       // authorized client
-	rootFolderID     string             // the id of the root folder
-	dirCache         *dircache.DirCache // Map of directory path to directory id
-	pacer            *fs.Pacer          // To pace the API calls
-	exportExtensions []string           // preferred extensions to download docs
-	importMimeTypes  []string           // MIME types to convert to docs
-	isTeamDrive      bool               // true if this is a team drive
-	fileFields       googleapi.Field    // fields to fetch file info with
-	m                configmap.Mapper
-	grouping         int32               // number of IDs to search at once in ListR - read with atomic
-	listRmu          *sync.Mutex         // protects listRempties
-	listRempties     map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
-	// DriveMod: service account
-	saMu               *sync.Mutex
-	ServiceAccountPool *ServiceAccountPool
-	lastChangeSATime   time.Time
-	FileObj            *fs.Object
-	FileName           string
+	name                string             // name of this remote
+	root                string             // the path we are working on
+	opt                 Options            // parsed options
+	features            *fs.Features       // optional features
+	svc                 *drive.Service     // the connection to the drive server
+	v2Svc               *drive_v2.Service  // used to create download links for the v2 api
+	client              *http.Client       // authorized client
+	rootFolderID        string             // the id of the root folder
+	dirCache            *dircache.DirCache // Map of directory path to directory id
+	pacer               *fs.Pacer          // To pace the API calls
+	exportExtensions    []string           // preferred extensions to download docs
+	importMimeTypes     []string           // MIME types to convert to docs
+	isTeamDrive         bool               // true if this is a team drive
+	fileFields          googleapi.Field    // fields to fetch file info with
+	m                   configmap.Mapper
+	grouping            int32               // number of IDs to search at once in ListR - read with atomic
+	listRmu             *sync.Mutex         // protects listRempties
+	listRempties        map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
+	ServiceAccountFiles map[string]int
+	serviceAccountMutex sync.Mutex
+	serviceAccountPool  *ServiceAccountPool
+	minChangeSAInterval time.Duration
+	lastChangeSATime    time.Time
+	FileObj             *fs.Object
+	FileName            string
 }
 
 type baseObject struct {
@@ -626,331 +627,144 @@ type Object struct {
 }
 
 // ------------------------------------------------------------
-// DriveMod
-
-// ServiceAccount ...
-type ServiceAccount struct {
-	Group       string
-	File        string
-	Credentials string
-	Weight      int
-	svc         *drive.Service
-	initialized bool
-}
-
-func newServiceAccount(group string, file string) (*ServiceAccount, error) {
-	u := &ServiceAccount{
-		Group: group,
-		File:  file,
-	}
-
-	// Read file
-	loadedCreds, err := ioutil.ReadFile(os.ExpandEnv(u.File))
-	if err != nil {
-		return nil, errors.Wrap(err, "error opening service account credentials file")
-	}
-	u.Credentials = string(loadedCreds)
-	return u, nil
-}
-
-// Initialized ....
-func (u *ServiceAccount) Initialized() bool {
-	return u.initialized
-}
-
-// CreateService create drive service from service account.
-// If last error is nil, it returns the last error.
-func (u *ServiceAccount) CreateService(f *Fs) (svc *drive.Service, err error) {
-	opt := &f.opt
-
-	oAuthClient, err := getServiceAccountClient(opt, []byte(u.Credentials))
-	if err != nil {
-		err = errors.Wrap(err, "failed to create oauth client from service account")
-		return nil, err
-	}
-
-	svc, err = drive.New(oAuthClient)
-	if err != nil {
-		err = errors.Wrap(err, "couldn't create Drive client")
-		return nil, err
-	}
-
-	u.svc = svc
-	return svc, nil
-}
-
-// Service return created service or create it if not created.
-func (u *ServiceAccount) Service(f *Fs) (svc *drive.Service, err error) {
-	if !u.initialized {
-		// Create Service
-		u.svc, err = u.CreateService(f)
-		u.initialized = true
-	}
-	return u.svc, err
-}
-
-// ServiceAccountGroup ...
-type ServiceAccountGroup struct {
-	Name   string
-	List   map[string]*ServiceAccount
-	Weight int
-}
-
-func newServiceAccountGroup(name string) *ServiceAccountGroup {
-	g := &ServiceAccountGroup{
-		Name: name,
-		List: make(map[string]*ServiceAccount),
-	}
-	return g
-}
 
 // ServiceAccountPool ...
 type ServiceAccountPool struct {
-	ID        string
-	Groups    map[string]*ServiceAccountGroup
-	LastGroup *ServiceAccountGroup
-	Max       int
-
-	Services []*drive.Service
-	existed  map[string]struct{}
-	// Weights           map[string]int
-	// LatestGroupWeight int
-
-	// Mutex *sync.Mutex
-	mu *sync.Mutex
+	Files map[string]struct{} // service account files
+	Max   int
+	svcs  []*drive.Service // drive service
+	mu    *sync.Mutex
 }
 
 func newServiceAccountPool(max int) *ServiceAccountPool {
 	p := &ServiceAccountPool{
-		Groups:    make(map[string]*ServiceAccountGroup),
-		LastGroup: &ServiceAccountGroup{},
-		Max:       max,
-		existed:   make(map[string]struct{}),
-		mu:        new(sync.Mutex),
-		// Mutex:  new(sync.Mutex),
+		Files: make(map[string]struct{}),
+		Max:   max,
+		mu:    new(sync.Mutex),
 	}
 	return p
 }
 
-// Load service account file from folder (recursive)
-func (p *ServiceAccountPool) Load(opt *Options) (err error) {
-	root := opt.ServiceAccountFilePath
-	if len(root) == 0 {
-		return errors.Errorf("service account folder is not set")
-	}
+// Load service account files (.json) from folder
+func (p *ServiceAccountPool) Load(opt *Options) (map[string]struct{}, error) {
+	list := make(map[string]struct{})
 
-	fs.Debugf(nil, "Loading Service Account File(s) from %q", root)
-	if _, err = os.Stat(root); !os.IsNotExist(err) {
-		err = filepath.Walk(root,
-			func(path string, f os.FileInfo, err error) error {
-				if err != nil {
-					return err
-				}
-				if !f.IsDir() && filepath.Ext(path) == ".json" {
-					// Create service account
-					groupKey := filepath.Dir(path)
-					if unit, e := newServiceAccount(groupKey, path); e == nil {
-						// Add to pool
-						p.PutAccount(filepath.Dir(path), unit)
-					}
-				}
-				return nil
-			})
+	// Read service account file from folder
+	saFolder := opt.ServiceAccountFilePath
+	if len(saFolder) > 0 {
+		fs.Debugf(nil, "Loading Service Account File(s) from %q", saFolder)
+		files, err := ioutil.ReadDir(saFolder)
 		if err != nil {
-			return errors.Wrap(err, "error loading service account from folder")
+			return nil, errors.Wrap(err, "error loading service account from folder")
+		}
+
+		// Add valid service account file
+		for _, file := range files {
+			filePath := path.Join(saFolder, file.Name())
+			if filePath == opt.ServiceAccountFile || path.Ext(filePath) != ".json" {
+				continue
+			}
+			list[filePath] = struct{}{}
 		}
 	}
-	fs.Debugf(nil, "Loaded %d Service Account File(s) from %d Project(s)", p.Size(), p.GroupSize())
-	return err
+
+	p.Files = list
+	fs.Debugf(nil, "Loaded %d Service Account File(s)", len(list))
+	return list, nil
 }
 
-// GroupSize ...
-func (p *ServiceAccountPool) GroupSize() int {
-	return len(p.Groups)
-}
-
-// Size ...
-func (p *ServiceAccountPool) Size() (size int) {
-	for _, g := range p.Groups {
-		size = size + len(g.List)
+func (p *ServiceAccountPool) _addService(svc *drive.Service) (bool, error) {
+	p.svcs = append([]*drive.Service{svc}, p.svcs...)
+	if len(p.svcs) > p.Max {
+		p.svcs = p.svcs[:p.Max]
 	}
-	return size
+	return true, nil
 }
 
-// IsEmpty ...
-func (p *ServiceAccountPool) IsEmpty() bool {
-	return p.Size() >= 0
+// AddService to the front
+func (p *ServiceAccountPool) AddService(svc *drive.Service) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p._addService(svc)
 }
 
-// CreateServices from the pool
-// count = -1 - create all service
-func (p *ServiceAccountPool) CreateServices(f *Fs, count int) ([]*drive.Service, error) {
-	newServices := make([]*drive.Service, 0)
+// GetService from the front
+func (p *ServiceAccountPool) GetService() (svc *drive.Service, err error) {
+	if len(p.svcs) == 0 {
+		return nil, errors.Errorf("No available services")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	svc, p.svcs = p.svcs[0], append(p.svcs[1:], p.svcs[0])
+	return
+}
 
-	for i := 0; i < p.Size(); i++ {
-		if count > -1 && len(newServices) >= count {
+// PreloadServices create services and add to front
+func (p *ServiceAccountPool) PreloadServices(f *Fs, count int) ([]*drive.Service, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	svcs := make([]*drive.Service, 0)
+	for file := range p.Files {
+		if len(svcs) >= count {
 			break
 		}
 
-		sa, err := p.GetAccount(false, false)
-		if err != nil {
-			continue
-		}
-		if !sa.Initialized() {
-			if svc, err := sa.Service(f); err == nil {
-				newServices = append(newServices, svc)
-			}
-		}
-	}
-
-	// add to front
-	p.Services = append(newServices, p.Services...)
-	return newServices, nil
-}
-
-// AddService add the service to the front
-func (p *ServiceAccountPool) AddService(file string, svc *drive.Service) (err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if _, ok := p.existed[file]; !ok {
-		p.existed[file] = struct{}{}
-		p.Services = append([]*drive.Service{svc}, p.Services...)
-
-		if len(p.Services) > p.Max {
-			p.Services = p.Services[:p.Max]
-		}
-	}
-	return nil
-}
-
-// GetService return service from the front
-func (p *ServiceAccountPool) GetService() (svc *drive.Service, err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if len(p.Services) == 0 {
-		return nil, errors.Errorf("No available services")
-	}
-
-	svc, p.Services = p.Services[0], append(p.Services[1:], p.Services[0])
-	// fs.Infof(nil, "Remain Service: %d | %s", len(p.Services), p.ID)
-	return
-}
-
-// _getGroup return group by random or weight (asc)...
-func (p *ServiceAccountPool) _getGroup(random bool) (g *ServiceAccountGroup) {
-	// by random
-	if random {
-		keys := []string{}
-		for k := range p.Groups {
-			keys = append(keys, k)
-		}
-		r := rand.Intn(len(keys))
-		return p.Groups[keys[r]]
-	}
-
-	// by weight
-	weights := []int{}
-	for _, g := range p.Groups {
-		weights = append(weights, g.Weight)
-	}
-	sort.Ints(weights)
-	weight := weights[0]
-
-	for _, g := range p.Groups {
-		if g.Weight == weight {
-			return g
-		}
-	}
-	return
-}
-
-// _getAccount ...
-func (p *ServiceAccountPool) _getAccount(random bool, remove bool) (sa *ServiceAccount, err error) {
-	if p.GroupSize() <= 0 {
-		err = errors.Errorf("No available groups")
-		return
-	}
-	if p.Size() <= 0 {
-		err = errors.Errorf("No available service accounts")
-		return
-	}
-
-	// Select group
-	group := p._getGroup(random)
-
-	// Select account
-	if random {
-		// by random
-		keys := []string{}
-		for k := range group.List {
-			keys = append(keys, k)
-		}
-		r := rand.Intn(len(keys))
-		sa = group.List[keys[r]]
-	} else {
-		// by weight
-		weights := []int{}
-		for _, sa := range group.List {
-			weights = append(weights, sa.Weight)
-		}
-		sort.Ints(weights)
-		weight := weights[0]
-
-		accounts := make([]*ServiceAccount, 0)
-		for _, v := range group.List {
-			if v.Weight == weight {
-				accounts = append(accounts, v)
-			}
-		}
-
-		sa = accounts[rand.Intn(len(accounts))]
-	}
-
-	p.LastGroup = group
-
-	if sa != nil {
-		if remove {
-			delete(group.List, sa.File)
-			// Remove empty group
-			if len(group.List) == 0 {
-				delete(p.Groups, group.Name)
-			}
+		// Create services
+		if svc, err := createDriveService(&f.opt, file); err != nil {
+			fs.Errorf(nil, "Preloading Service Account (%s): %v", file, err)
 		} else {
-			group.Weight++
-			sa.Weight++
+			svcs = append(svcs, svc)
 		}
 	}
-	return sa, err
+
+	p.svcs = append(svcs, p.svcs...)
+	fs.Debugf(nil, "Preloaded %d Service(s) from Service Account", len(svcs))
+	return svcs, nil
 }
 
-// PutAccount service account into pool with group name
-func (p *ServiceAccountPool) PutAccount(groupName string, sa *ServiceAccount) (err error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// Create group if not exists
-	if _, ok := p.Groups[groupName]; !ok {
-		p.Groups[groupName] = newServiceAccountGroup(groupName)
+func (p *ServiceAccountPool) _getFile(remove bool) (file string, err error) {
+	files := p.Files
+	if len(files) == 0 {
+		err = errors.Errorf("no available service account file")
+		return
 	}
-	g := p.Groups[groupName]
 
-	// Add to group
-	g.List[sa.File] = sa
+	keys := []string{}
+	for k := range files {
+		keys = append(keys, k)
+	}
+	r := rand.Intn(len(keys))
+	file = keys[r]
+
+	if remove {
+		delete(files, file)
+	}
 	return
 }
 
-// GetAccount return service account with lowest weight.
-// - select group (weight ASC)
-// - select account (random OR weight ASC)
-// - group's weight + 1
-// - account's weight + 1
-func (p *ServiceAccountPool) GetAccount(random bool, remove bool) (sa *ServiceAccount, err error) {
+// GetFile return service account file path from pool
+func (p *ServiceAccountPool) GetFile(remove bool) (file string, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p._getFile(remove)
+}
 
-	return p._getAccount(random, remove)
+func createDriveService(opt *Options, file string) (svc *drive.Service, err error) {
+	// fs.Debugf(nil, "Preloading Service Account File from %s", file)
+	loadedCreds, err := ioutil.ReadFile(os.ExpandEnv(file))
+	if err != nil {
+		return nil, errors.Wrap(err, "error opening service account credentials file")
+	}
+	oAuthClient, err := getServiceAccountClient(opt, loadedCreds)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create oauth client from service account")
+	}
+	svc, err = drive.New(oAuthClient)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't create Drive client")
+	}
+	return svc, err
 }
 
 // ------------------------------------------------------------
@@ -975,11 +789,6 @@ func (f *Fs) Features() *fs.Features {
 	return f.features
 }
 
-// DirCache ....
-func (f *Fs) DirCache() *dircache.DirCache {
-	return f.dirCache
-}
-
 // shouldRetry determines whether a given err rates being retried
 func (f *Fs) shouldRetry(err error) (bool, error) {
 	if err == nil {
@@ -996,23 +805,19 @@ func (f *Fs) shouldRetry(err error) (bool, error) {
 		}
 		if len(gerr.Errors) > 0 {
 			reason := gerr.Errors[0].Reason
-			// fs.Logf(nil, "Retry: %s", reason)
 			message := gerr.Errors[0].Message
 			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" || (reason == "dailyLimitExceededUnreg" || strings.HasPrefix(message, "Daily Limit")) {
-				// DriveMod: change service account
-				// if f.hasSA() {
-				f.saMu.Lock()
-				defer f.saMu.Unlock()
-
+				// Mod: change service account
+				f.serviceAccountMutex.Lock()
+				defer f.serviceAccountMutex.Unlock()
 				if ok, _ := f.shouldChangeSA(); ok {
-					if e := f.changeServiceAccount(reason, true); e != nil {
-						fs.Errorf(f, "Change service account error: %v", err)
+					if e := f.changeServiceAccount(reason); e != nil {
+						fs.Errorf(nil, "Change service account error: %v", e)
 					} else {
-						f.ServiceAccountPool.AddService(f.opt.ServiceAccountFile, f.svc)
+						f.serviceAccountPool.AddService(f.svc)
 					}
 					return true, err
 				}
-				// }
 
 				if f.opt.StopOnUploadLimit && gerr.Errors[0].Message == "User rate limit exceeded." {
 					fs.Errorf(f, "Received upload limit error: %v", err)
@@ -1048,12 +853,6 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
-// GetFile returns drive.File for the ID passed and fields passed in
-//* DriveMod export function
-func (f *Fs) GetFile(ID string, fields googleapi.Field) (info *drive.File, err error) {
-	return f.getFile(ID, fields)
-}
-
 // getFile returns drive.File for the ID passed and fields passed in
 func (f *Fs) getFile(ID string, fields googleapi.Field) (info *drive.File, err error) {
 	err = f.pacer.CallNoRetry(func() (bool, error) {
@@ -1064,12 +863,6 @@ func (f *Fs) getFile(ID string, fields googleapi.Field) (info *drive.File, err e
 		return f.shouldRetry(err)
 	})
 	return info, err
-}
-
-// GetRootID ....
-//* DriveMod export function
-func (f *Fs) GetRootID() (string, error) {
-	return f.getRootID()
 }
 
 // getRootID returns the canonical ID for the "root" ID
@@ -1095,7 +888,6 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 		}
 		query = append(query, q)
 	}
-
 	// Search with sharedWithMe will always return things listed in "Shared With Me" (without any parents)
 	// We must not filter with parent when we try list "ROOT" with drive-shared-with-me
 	// If we need to list file inside those shared folders, we must search it without sharedWithMe
@@ -1155,11 +947,10 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 		query = append(query, fmt.Sprintf("mimeType!='%s'", driveFolderType))
 	}
 
-	// DriveMod
+	// Mod
 	svc := f.svc
-	if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+	if s, _ := f.serviceAccountPool.GetService(); err == nil && s != nil {
 		svc = s
-		// f.pacer = newPacer(&f.opt)
 	}
 
 	list := svc.Files.List()
@@ -1447,15 +1238,15 @@ func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
 func parseRootID(s string) (rootID string, err error) {
 	re := regexp.MustCompile(`\{([^}]{5,})\}`)
 	m := re.FindStringSubmatch(s)
-	if m == nil{
+	if m == nil {
 		return "", errors.Errorf("%s doesn't not contain valid id", s)
-	}	
+	}
 	rootID = m[1]
 
 	if strings.HasPrefix(rootID, "http") {
 		// folders - https://drive.google.com/drive/u/0/folders/
 		// file - https://drive.google.com/file/d/
-		re :=   regexp.MustCompile(`\/(folders|files|file\/d)(\/([A-Za-z0-9_-]{6,}))+\/?`)
+		re := regexp.MustCompile(`\/(folders|files|file\/d)(\/([A-Za-z0-9_-]{6,}))+\/?`)
 		if m := re.FindStringSubmatch(rootID); m != nil {
 			rootID = m[len(m)-1]
 			return
@@ -1468,8 +1259,7 @@ func parseRootID(s string) (rootID string, err error) {
 			return
 		}
 	}
-
-	return 
+	return
 }
 
 // newFs partially constructs Fs from the path
@@ -1481,15 +1271,14 @@ func newFs(name, path string, m configmap.Mapper) (*Fs, error) {
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
 
-		// DriveMod: parse object id from path remote:{ID}
-		if rootID, _ := parseRootID(path); len(rootID) >6 {				
-			// fs.Debugf(nil, "Root ID detected: %s", rootID)
-			name += rootID
-			// opt.RootFolderID = rootID
-			path = path[strings.Index(path, "}")+1:]
-		}
+	// DriveMod: parse object id from path remote:{ID}
+	if rootID, _ := parseRootID(path); len(rootID) > 6 {
+		// fs.Debugf(nil, "Root ID detected: %s", rootID)
+		name += rootID
+		// opt.RootFolderID = rootID
+		path = path[strings.Index(path, "}")+1:]
+	}
 
-		
 	if err != nil {
 		return nil, err
 	}
@@ -1502,15 +1291,13 @@ func newFs(name, path string, m configmap.Mapper) (*Fs, error) {
 		return nil, errors.Wrap(err, "drive: chunk size")
 	}
 
-	// DriveMod: ServiceAccountPool
+	// Mod: create service account pool
 	pool := newServiceAccountPool(opt.ServicesMax)
-	if err := pool.Load(opt); err == nil {
-		// Assign default service account file
-		if len(opt.ServiceAccountFile) == 0 {
-			if sa, err := pool.GetAccount(true, false); err == nil {
-				opt.ServiceAccountFile = sa.File
-				fs.Debugf(nil, "Assigned Service Account File to %s", sa.File)
-			}
+	if _, err := pool.Load(opt); err == nil {
+		// Assign default service account file if not set
+		if file, err := pool.GetFile(true); err == nil {
+			opt.ServiceAccountFile = file
+			fs.Debugf(nil, "Assigned Service Account File to %s", file)
 		}
 	}
 
@@ -1525,18 +1312,15 @@ func newFs(name, path string, m configmap.Mapper) (*Fs, error) {
 	}
 
 	f := &Fs{
-		name:         name,
-		root:         root,
-		opt:          *opt,
-		pacer:        fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst))),
-		m:            m,
-		grouping:     listRGrouping,
-		listRmu:      new(sync.Mutex),
-		listRempties: make(map[string]struct{}),
-
-		// DriveMod
-		saMu:               new(sync.Mutex),
-		ServiceAccountPool: pool,
+		name:               name,
+		root:               root,
+		opt:                *opt,
+		pacer:              fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst))),
+		m:                  m,
+		grouping:           listRGrouping,
+		listRmu:            new(sync.Mutex),
+		listRempties:       make(map[string]struct{}),
+		serviceAccountPool: pool,
 	}
 	f.isTeamDrive = opt.TeamDriveID != ""
 	f.fileFields = f.getFileFields()
@@ -1555,17 +1339,20 @@ func newFs(name, path string, m configmap.Mapper) (*Fs, error) {
 		return nil, errors.Wrap(err, "couldn't create Drive client")
 	}
 
-	// DriveMod: Create service
-	if f.ServiceAccountPool.Size() > 0 {
-		if _, err := f.ServiceAccountPool.CreateServices(f, f.opt.ServicesPreload); err != nil {
-			return nil, errors.Wrap(err, "couldn't create service for service account")
-		}
-	}
-
 	if f.opt.V2DownloadMinSize >= 0 {
 		f.v2Svc, err = drive_v2.New(f.client)
 		if err != nil {
 			return nil, errors.Wrap(err, "couldn't create Drive v2 client")
+		}
+	}
+
+	// Mod: Preload services
+	if len(f.serviceAccountPool.Files) > 0 {
+		if svcs, err := f.serviceAccountPool.PreloadServices(f, f.opt.ServicesPreload); err == nil {
+			if len(svcs) > 10 && opt.PacerMinSleep >= defaultMinSleep {
+				opt.PacerMinSleep = defaultSAPacerMinSleep
+				f.pacer = fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(f.opt.PacerMinSleep), pacer.Burst(f.opt.PacerBurst)))
+			}
 		}
 	}
 
@@ -1583,7 +1370,7 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	// DriveMod: parse object id from path remote:{ID}
 	// isFileID := false
 	var srcFile *drive.File
-	if rootID, _ := parseRootID(path); len(rootID) >6 {		
+	if rootID, _ := parseRootID(path); len(rootID) > 6 {
 
 		err = f.pacer.Call(func() (bool, error) {
 			srcFile, err = f.svc.Files.Get(rootID).
@@ -1592,16 +1379,16 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 				Do()
 			return f.shouldRetry(err)
 		})
-		if err == nil{
-			if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder"{
+		if err == nil {
+			if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder" {
 				fs.Debugf(nil, "Root ID (File): %s", rootID)
-				f.opt.RootFolderID = rootID				
-			}else{
+				f.opt.RootFolderID = rootID
+			} else {
 				if srcFile.DriveId == rootID {
 					fs.Debugf(nil, "Root ID (Drive): %s", rootID)
 					f.opt.RootFolderID = ""
-					f.opt.TeamDriveID = rootID					
-				}else{
+					f.opt.TeamDriveID = rootID
+				} else {
 					fs.Debugf(nil, "Root ID (Folder): %s", rootID)
 					f.opt.RootFolderID = rootID
 				}
@@ -1610,7 +1397,6 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 			f.isTeamDrive = f.opt.TeamDriveID != ""
 		}
 	}
-
 
 	// Set the root folder ID
 	if f.opt.RootFolderID != "" {
@@ -1654,41 +1440,19 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 		return nil, err
 	}
 
-	// DriveMod: confirm the object ID is file
 	if srcFile != nil {
-		// if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder"{
-			tempF := *f
-			newRoot := ""
-			tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
-			tempF.root = newRoot
-			f.dirCache = tempF.dirCache
-			f.root = tempF.root
+		tempF := *f
+		newRoot := ""
+		tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
+		tempF.root = newRoot
+		f.dirCache = tempF.dirCache
+		f.root = tempF.root
 
-			extension, exportName, exportMimeType, isDocument := f.findExportFormat(srcFile)
-			obj, _ := f.newObjectWithExportInfo(srcFile.Name, srcFile, extension, exportName, exportMimeType, isDocument)
-			f.root = "isFile:" + srcFile.Name
-			f.FileObj = &obj
-			return f, fs.ErrorIsFile
-		// }
-
-		// file, err := f.svc.Files.Get(f.rootFolderID).Fields("name", "id", "size", "mimeType").SupportsAllDrives(true).Do()
-		// if err == nil {
-		// 	//fmt.Println("file.MimeType", file.MimeType)
-		// 	if  != file.MimeType && file.MimeType != "" {
-		// 		tempF := *f
-		// 		newRoot := ""
-		// 		tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
-		// 		tempF.root = newRoot
-		// 		f.dirCache = tempF.dirCache
-		// 		f.root = tempF.root
-
-		// 		extension, exportName, exportMimeType, isDocument := f.findExportFormat(file)
-		// 		obj, _ := f.newObjectWithExportInfo(file.Name, file, extension, exportName, exportMimeType, isDocument)
-		// 		f.root = "isFile:" + file.Name
-		// 		f.FileObj = &obj
-		// 		return f, fs.ErrorIsFile
-		// 	}
-		// }
+		extension, exportName, exportMimeType, isDocument := f.findExportFormat(srcFile)
+		obj, _ := f.newObjectWithExportInfo(srcFile.Name, srcFile, extension, exportName, exportMimeType, isDocument)
+		f.root = "isFile:" + srcFile.Name
+		f.FileObj = &obj
+		return f, fs.ErrorIsFile
 	}
 
 	// Find the current root
@@ -1951,9 +1715,9 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
-		// DriveMod
+		// Mod
 		svc := f.svc
-		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+		if s, _ := f.serviceAccountPool.GetService(); err == nil && s != nil {
 			svc = s
 		}
 
@@ -1968,45 +1732,6 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 	}
 	return info.Id, nil
 }
-
-// CreateLeafDir makes a directory with path (non-recursive)
-// if parent is not exists, it returns an error
-//* DriveMod
-func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err error) {
-	parentID, err := f.dirCache.RootID(ctx, false)
-	if err != nil {
-		return "", err
-	}
-
-	// root	
-	if dir == "" {
-		return parentID, err
-	}
-
-	// check if exists
-	newID, ok := f.dirCache.Get(dir)
-	if ok {
-		return newID, nil
-	}
-
-	parent, leaf := dircache.SplitPath(dir)
-	if parent != "" {
-		// Find parent
-		parentID, ok = f.dirCache.Get(parent)
-		if !ok {
-			return "", fs.ErrorDirNotFound
-		}
-	}
-
-	newID, err = f.CreateDir(ctx, parentID, leaf)
-	if err == nil {
-		f.dirCache.Put(dir, newID)
-	}
-
-	return
-}
-
-// DriveMod
 
 type createDirTask struct {
 	path    string
@@ -2023,12 +1748,6 @@ func newCreateDirTasks(path string) createDirTask {
 		depth:  strings.Count(filepath.ToSlash(path), "/"),
 	}
 }
-
-// type createDirTasks []createDirTask
-
-// func (t createDirTasks) Len() int           { return len(t) }
-// func (t createDirTasks) Less(i, j int) bool { return t[i].depth < t[j].depth }
-// func (t createDirTasks) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
 
 func (f *Fs) createDirsRunner(ctx context.Context, wg *sync.WaitGroup, in chan createDirTask, out chan<- createDirTask, errs chan<- error, cb func(createDirTask) (bool, error)) {
 	for t := range in {
@@ -2828,7 +2547,6 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 		// Make the API request to upload metadata and file data.
 		// Don't retry, return a retry error instead
 		err = f.pacer.CallNoRetry(func() (bool, error) {
-			// fs.Infof(nil, "SVC::Create")
 			info, err = f.svc.Files.Create(createInfo).
 				Media(in, googleapi.ContentType(srcMimeType)).
 				Fields(partialFields).
@@ -2884,8 +2602,6 @@ func (f *Fs) MergeDirs(ctx context.Context, dirs []fs.Directory) error {
 			fs.Infof(srcDir, "merging %q", info.Name)
 			// Move the file into the destination
 			err = f.pacer.Call(func() (bool, error) {
-				// fs.Infof(nil, "SVC::Update (MergeDirs)")
-
 				_, err = f.svc.Files.Update(info.Id, nil).
 					RemoveParents(srcDir.ID()).
 					AddParents(dstDir.ID()).
@@ -2918,22 +2634,16 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 func (f *Fs) delete(ctx context.Context, id string, useTrash bool) error {
 	return f.pacer.Call(func() (bool, error) {
 		var err error
-
-		// DriveMod
-		svc := f.svc
-
 		if useTrash {
 			info := drive.File{
 				Trashed: true,
 			}
-			// fs.Infof(nil, "SVC::Update (delete)")
-			_, err = svc.Files.Update(id, &info).
+			_, err = f.svc.Files.Update(id, &info).
 				Fields("").
 				SupportsAllDrives(true).
 				Do()
 		} else {
-			// fs.Infof(nil, "SVC::Update (delete)")
-			err = svc.Files.Delete(id).
+			err = f.svc.Files.Delete(id).
 				Fields("").
 				SupportsAllDrives(true).
 				Do()
@@ -3065,22 +2775,12 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	// get the ID of the thing to copy - this is the shortcut if available
 	id := shortcutID(srcObj.id)
 
-	// DriveMod
-	// svc := f.svc
-	// if s, _ := f.ServiceAccountPool.GetService(); s != nil {
-	// 	svc = s
-	// 	f.pacer = newPacer(&f.opt)
-	// }
-
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
-		// fs.Infof(nil, "SVC::Copy | %s", srcObj.Remote())
-
-		// DriveMod
+		// Mod
 		svc := f.svc
-		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+		if s, _ := f.serviceAccountPool.GetService(); err == nil && s != nil {
 			svc = s
-			f.pacer = fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(f.opt.PacerMinSleep), pacer.Burst(f.opt.PacerBurst)))
 		}
 
 		info, err = svc.Files.Copy(id, createInfo).
@@ -3120,32 +2820,6 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		}
 	}
 	return newObject, nil
-}
-
-// CopyByID get src object by ID and copy to remote using server side copy operations.
-//* DriveMod
-func (f *Fs) CopyByID(ctx context.Context, srcID string, remote string) (fs.Object, error) {
-	var err error
-	var file *drive.File
-	err = f.pacer.Call(func() (bool, error) {
-		// fs.Infof(nil, "SVC::Copy")
-		file, err = f.svc.Files.Get(srcID).
-			Fields("name", "id", "size", "mimeType").
-			SupportsAllDrives(true).
-			Do()
-		return f.shouldRetry(err)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	extension, exportName, exportMimeType, isDocument := f.findExportFormat(file)
-	src, err := f.newObjectWithExportInfo(file.Name, file, extension, exportName, exportMimeType, isDocument)
-	if err != nil {
-		return nil, err
-	}
-
-	return f.Copy(ctx, src, remote)
 }
 
 // Purge deletes all the files and the container
@@ -3271,7 +2945,6 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	// Do the move
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
-		// fs.Infof(nil, "SVC::Update (Move)")
 		info, err = f.svc.Files.Update(shortcutID(srcObj.id), dstInfo).
 			RemoveParents(srcParentID).
 			AddParents(dstParents).
@@ -3352,7 +3025,6 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		Name: dstLeaf,
 	}
 	err = f.pacer.Call(func() (bool, error) {
-		// fs.Infof(nil, "SVC::Update (DirMove)")
 		_, err = f.svc.Files.Update(shortcutID(srcID), &patch).
 			RemoveParents(srcDirectoryID).
 			AddParents(dstDirectoryID).
@@ -3420,9 +3092,8 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 func (f *Fs) changeNotifyStartPageToken() (pageToken string, err error) {
 	var startPageToken *drive.StartPageToken
 	err = f.pacer.Call(func() (bool, error) {
-		// DriveMod
 		svc := f.svc
-		if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+		if s, _ := f.serviceAccountPool.GetService(); s != nil {
 			svc = s
 		}
 
@@ -3445,11 +3116,9 @@ func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.
 		var changeList *drive.ChangeList
 
 		err = f.pacer.Call(func() (bool, error) {
-			// DriveMod
 			svc := f.svc
-			if s, _ := f.ServiceAccountPool.GetService(); s != nil {
+			if s, _ := f.serviceAccountPool.GetService(); s != nil {
 				svc = s
-				// f.pacer = newPacer(&f.opt)
 			}
 
 			changesCall := svc.Changes.List(pageToken).
@@ -3559,7 +3228,7 @@ func (f *Fs) changeChunkSize(chunkSizeString string) (err error) {
 	return err
 }
 
-// DriveMod: shouldChangeSA determines whether multiple service accounts existed
+// Mod: shouldChangeSA determines whether multiple service accounts existed
 func (f *Fs) shouldChangeSA() (bool, error) {
 	if len(f.opt.ServiceAccountFilePath) == 0 {
 		return false, nil
@@ -3570,43 +3239,30 @@ func (f *Fs) shouldChangeSA() (bool, error) {
 	return false, nil
 }
 
-func (f *Fs) hasSA() bool {
-	if f.ServiceAccountPool == nil {
-		return false
-	}
-	if len(f.opt.ServiceAccountFilePath) == 0 {
-		return false
-	}
-	return true
-}
-
-// DriveMod: changeServiceAccount change service account from list
-// Read json from folder if empty.
-func (f *Fs) changeServiceAccount(reason string, remove bool) (err error) {
+// Mod: changeServiceAccount select service account file from pool
+// Load files to pool if empty
+func (f *Fs) changeServiceAccount(reason string) (err error) {
 	opt := &f.opt
 
-	// Load
-	if f.ServiceAccountPool.Size() == 0 {
-		if err := f.ServiceAccountPool.Load(opt); err != nil {
+	// Load  service account files
+	if len(f.serviceAccountPool.Files) == 0 {
+		if _, err := f.serviceAccountPool.Load(opt); err != nil {
 			return err
 		}
-		if len(f.ServiceAccountPool.Services) == 0 {
-			f.ServiceAccountPool.CreateServices(f, f.opt.ServicesPreload)
-		}
 	}
-
-	if f.ServiceAccountPool.Size() == 0 {
+	if len(f.serviceAccountPool.Files) == 0 {
 		return errors.Errorf("no available service account file")
 	}
 
-	// Pop service account
-	var u *ServiceAccount
-	if u, err = f.ServiceAccountPool.GetAccount(true, remove); err == nil {
-		err = f.changeServiceAccountFile(u.File)
+	// Select  service account file
+	file, err := f.serviceAccountPool.GetFile(true)
+	if err != nil {
+		return err
 	}
 
+	err = f.changeServiceAccountFile(file)
 	if err == nil {
-		fs.Debugf(nil, "Service Account Changed (fs: %s, root: %s, remain: %d, reason: %s, project (%d): %s)", f.name, f.root, f.ServiceAccountPool.Size(), reason, f.ServiceAccountPool.LastGroup.Weight, filepath.Base(f.ServiceAccountPool.LastGroup.Name))
+		fs.Debugf(nil, "Service Account Changed (remain: %d, reason: %s)", len(f.serviceAccountPool.Files), reason)
 	}
 	return err
 }

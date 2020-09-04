@@ -71,7 +71,7 @@ const (
 
 // ShowVersion prints the version to stdout
 func ShowVersion() {
-	fmt.Printf("rclone %s\n", fs.Version)
+	fmt.Printf("fclone %s\n", fs.Version)
 	fmt.Printf("- os/arch: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 	fmt.Printf("- go version: %s\n", runtime.Version())
 }
