@@ -252,7 +252,7 @@ a non root folder as its starting point.
 			Default:  maxServices,
 			Help:     "Max service account's drive service stored on memory",
 			Hide:     fs.OptionHideConfigurator,
-			Advanced: true,			
+			Advanced: true,
 		}, {
 			Name:     "service_account_credentials",
 			Help:     "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -981,7 +981,6 @@ func (f *Fs) DirCache() *dircache.DirCache {
 
 // shouldRetry determines whether a given err rates being retried
 func (f *Fs) shouldRetry(err error) (bool, error) {
-
 	if err == nil {
 		return false, nil
 	}
@@ -1445,24 +1444,30 @@ func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
 }
 
 func parseRootID(s string) (rootID string, err error) {
-	rootID = s
+	re := regexp.MustCompile(`\{([^}]{5,})\}`)
+	m := re.FindStringSubmatch(s)
+	if m == nil {
+		return "", errors.Errorf("%s doesn't not contain valid id", s)
+	}
+	rootID = m[1]
 
-	if strings.HasPrefix(s, "http") {
+	if strings.HasPrefix(rootID, "http") {
 		// folders - https://drive.google.com/drive/u/0/folders/
 		// file - https://drive.google.com/file/d/
-		re := regexp.MustCompile(`\/(folders|files|file\/d)\/([A-Za-z0-9_-]+)\/?`)
-		if m := re.FindStringSubmatch(s); m != nil {
-			rootID = m[2]
+		re := regexp.MustCompile(`\/(folders|files|file\/d)(\/([A-Za-z0-9_-]{6,}))+\/?`)
+		if m := re.FindStringSubmatch(rootID); m != nil {
+			rootID = m[len(m)-1]
 			return
 		}
 
 		// id - https://drive.google.com/open?id=
-		re = regexp.MustCompile(`.+id=([A-Za-z0-9_-]+).?`)
-		if m := re.FindStringSubmatch(s); m != nil {
+		re = regexp.MustCompile(`.+id=([A-Za-z0-9_-]{6,}).?`)
+		if m := re.FindStringSubmatch(rootID); m != nil {
 			rootID = m[1]
 			return
 		}
 	}
+
 	return
 }
 
@@ -1476,27 +1481,11 @@ func newFs(name, path string, m configmap.Mapper) (*Fs, error) {
 	err := configstruct.Set(m, opt)
 
 	// DriveMod: parse object id from path remote:{ID}
-	// isFileID := false
-	if path != "" && path[0:1] == "{" && strings.Contains(path, "}") {
-		idIndex := strings.Index(path, "}")
-		if idIndex > 0 {
-			rootID, err := parseRootID(path[1:idIndex])
-			if err != nil {
-
-			} else {
-				name += rootID
-				fs.Debugf(nil, "Root ID detected: %s", rootID)
-				//opt.ServerSideAcrossConfigs = true
-				if len(rootID) == 33 || len(rootID) == 28 {
-					// isFileID = true
-					opt.RootFolderID = rootID
-				} else {
-					opt.RootFolderID = rootID
-					opt.TeamDriveID = rootID
-				}
-				path = path[idIndex+1:]
-			}
-		}
+	if rootID, _ := parseRootID(path); len(rootID) > 6 {
+		// fs.Debugf(nil, "Root ID detected: %s", rootID)
+		name += rootID
+		// opt.RootFolderID = rootID
+		path = path[strings.Index(path, "}")+1:]
 	}
 
 	if err != nil {
@@ -1589,6 +1578,37 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 		return nil, err
 	}
 
+	// DriveMod: parse object id from path remote:{ID}
+	// isFileID := false
+	var srcFile *drive.File
+	if rootID, _ := parseRootID(path); len(rootID) > 6 {
+
+		err = f.pacer.Call(func() (bool, error) {
+			srcFile, err = f.svc.Files.Get(rootID).
+				Fields("name", "id", "size", "mimeType", "driveId").
+				SupportsAllDrives(true).
+				Do()
+			return f.shouldRetry(err)
+		})
+		if err == nil {
+			if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder" {
+				fs.Debugf(nil, "Root ID (File): %s", rootID)
+				f.opt.RootFolderID = rootID
+			} else {
+				if srcFile.DriveId == rootID {
+					fs.Debugf(nil, "Root ID (Drive): %s", rootID)
+					f.opt.RootFolderID = ""
+					f.opt.TeamDriveID = rootID
+				} else {
+					fs.Debugf(nil, "Root ID (Folder): %s", rootID)
+					f.opt.RootFolderID = rootID
+				}
+				srcFile = nil
+			}
+			f.isTeamDrive = f.opt.TeamDriveID != ""
+		}
+	}
+
 	// Set the root folder ID
 	if f.opt.RootFolderID != "" {
 		// use root_folder ID if set
@@ -1632,25 +1652,19 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	}
 
 	// DriveMod: confirm the object ID is file
-	if len(f.rootFolderID) == 33 || len(f.rootFolderID) == 28 {
-		file, err := f.svc.Files.Get(f.rootFolderID).Fields("name", "id", "size", "mimeType").SupportsAllDrives(true).Do()
-		if err == nil {
-			//fmt.Println("file.MimeType", file.MimeType)
-			if "application/vnd.google-apps.folder" != file.MimeType && file.MimeType != "" {
-				tempF := *f
-				newRoot := ""
-				tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
-				tempF.root = newRoot
-				f.dirCache = tempF.dirCache
-				f.root = tempF.root
+	if srcFile != nil {
+		tempF := *f
+		newRoot := ""
+		tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
+		tempF.root = newRoot
+		f.dirCache = tempF.dirCache
+		f.root = tempF.root
 
-				extension, exportName, exportMimeType, isDocument := f.findExportFormat(file)
-				obj, _ := f.newObjectWithExportInfo(file.Name, file, extension, exportName, exportMimeType, isDocument)
-				f.root = "isFile:" + file.Name
-				f.FileObj = &obj
-				return f, fs.ErrorIsFile
-			}
-		}
+		extension, exportName, exportMimeType, isDocument := f.findExportFormat(srcFile)
+		obj, _ := f.newObjectWithExportInfo(srcFile.Name, srcFile, extension, exportName, exportMimeType, isDocument)
+		f.root = "isFile:" + srcFile.Name
+		f.FileObj = &obj
+		return f, fs.ErrorIsFile
 	}
 
 	// Find the current root
@@ -1940,7 +1954,7 @@ func (f *Fs) CreateLeafDir(ctx context.Context, dir string) (newID string, err e
 		return "", err
 	}
 
-	// root	
+	// root
 	if dir == "" {
 		return parentID, err
 	}
@@ -3110,40 +3124,6 @@ func (f *Fs) CopyByID(ctx context.Context, srcID string, remote string) (fs.Obje
 	return f.Copy(ctx, src, remote)
 }
 
-// ListAllDrives fetch all team drives
-//* DriveMod
-func (f *Fs) ListAllDrives(ctx context.Context) (map[string]string, error) {
-	var err error
-	driveMap := make(map[string]string)
-
-	listTeamDrives := f.svc.Teamdrives.List().PageSize(100)
-	for {
-		var teamDrives *drive.TeamDriveList
-		err = f.pacer.Call(func() (bool, error) {
-			teamDrives, err = listTeamDrives.Context(ctx).Do()
-			return f.shouldRetry(err)
-		})
-		if err != nil {
-			return nil, errors.Errorf("Listing team drives failed: %v\n", err)
-			// listFailed = true
-			// break
-		}
-		for _, drive := range teamDrives.TeamDrives {
-			driveMap[drive.Id] = drive.Name
-		}
-		if teamDrives.NextPageToken == "" {
-			break
-		}
-		listTeamDrives.PageToken(teamDrives.NextPageToken)
-	}
-
-	if len(driveMap) == 0 {
-		return nil, errors.Errorf("No team drives found in your account")
-	}
-
-	return driveMap, nil
-}
-
 // Purge deletes all the files and the container
 //
 // Optional interface: Only implement this if you have a way of
@@ -3726,32 +3706,6 @@ func (f *Fs) makeShortcut(ctx context.Context, srcPath string, dstFs *Fs, dstPat
 	return dstFs.newObjectWithInfo(dstPath, info)
 }
 
-// List all team drives with right
-func (f *Fs) listDrives(ctx context.Context) (driveMap map[string]*drive.Drive, err error) {
-	driveMap = make(map[string]*drive.Drive)
-
-	listDrives := f.svc.Drives.List().PageSize(100)
-	for {
-		var drives *drive.DriveList
-		err = f.pacer.Call(func() (bool, error) {
-			drives, err = listDrives.Context(ctx).Do()
-			return f.shouldRetry(err)
-		})
-		if err != nil {
-			return nil, errors.Errorf("Listing team drives failed: %v\n", err)
-		}
-		for _, drive := range drives.Drives {
-			driveMap[drive.Id] = drive
-		}
-		if drives.NextPageToken == "" {
-			break
-		}
-		listDrives.PageToken(drives.NextPageToken)
-	}
-
-	return driveMap, err
-}
-
 // List all team drives
 func (f *Fs) listTeamDrives(ctx context.Context) (drives []*drive.TeamDrive, err error) {
 	drives = []*drive.TeamDrive{}
@@ -3898,7 +3852,8 @@ authenticated with "drive2:" can't read files from "drive:".
 }, {
 	Name:  "lsdrives",
 	Short: "List all shared drives with right",
-	Long: `This command list all shared drives with right
+	Long: `This command list all shared drives (teamdrives) available to this
+	account formatted for parsing.
 
 Usage:
 
@@ -4020,7 +3975,6 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 			}
 		}
 		return f.makeShortcut(ctx, arg[0], dstFs, arg[1])
-
 	case "lsdrives":
 		if len(arg) >= 1 {
 			return nil, errors.New("no arguments needed")
@@ -4031,9 +3985,14 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 			sep = s
 		}
 
-		driveMap, err := f.listDrives(ctx)
+		// fetch drives
+		teamDrives, err := f.listTeamDrives(ctx)
 		if err != nil {
 			return nil, err
+		}
+		driveMap := make(map[string]*drive.TeamDrive)
+		for _, drive := range teamDrives {
+			driveMap[drive.Id] = drive
 		}
 
 		if len(driveMap) == 0 {
@@ -4048,6 +4007,7 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 		}
 		sort.Strings(keys)
 
+		// print
 		for _, k := range keys {
 			for _, drive := range driveMap {
 				if drive.Name != k {
@@ -4056,7 +4016,6 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 				fmt.Printf("%s%s%s\n", drive.Id, sep, drive.Name)
 			}
 		}
-
 		return nil, nil
 	case "drives":
 		return f.listTeamDrives(ctx)
