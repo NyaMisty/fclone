@@ -1728,7 +1728,7 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 		return f.shouldRetry(err)
 	})
 	if err != nil {
-		return "", err
+		return "", errors.Errorf("Couldn't create directory (%s): %v", leaf, err)
 	}
 	return info.Id, nil
 }
@@ -1738,6 +1738,7 @@ type createDirTask struct {
 	parent  string
 	depth   int
 	retries int
+	err 	error
 }
 
 func newCreateDirTasks(path string) createDirTask {
@@ -1749,31 +1750,31 @@ func newCreateDirTasks(path string) createDirTask {
 	}
 }
 
-func (f *Fs) createDirsRunner(ctx context.Context, wg *sync.WaitGroup, in chan createDirTask, out chan<- createDirTask, errs chan<- error, cb func(createDirTask) (bool, error)) {
+func (f *Fs) createDirsRunner(ctx context.Context, wg *sync.WaitGroup, in chan createDirTask, out chan<- createDirTask, failed chan<- createDirTask, cb func(createDirTask) (bool, error)) {
+	defer func(){
+		wg.Done()
+	}()
+
 	for t := range in {
 		ok, err := cb(t)
-		if ok {
-			out <- t
-		} else {
-			if err != nil {
-				if t.retries > fs.Config.LowLevelRetries {
-					errs <- err
-				}
-				t.retries = t.retries + 1
+		
+		select {
+		case <-ctx.Done():			
+			return	
+		default:
+			if ok {
+				out <- t
+			} else {
+				t.err = err
+				failed <- t
 			}
-
-			wg.Add(1)
-			go func() {
-				time.Sleep(time.Duration(100*t.depth+(t.retries+1)*rand.Intn(100)) * time.Millisecond)
-				in <- t
-			}()
 		}
 	}
 }
 
 // CreateDirs makes multiple directory
 func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (count int, err error) {
-	err = f.dirCache.FindRoot(ctx, true)
+	// err = f.dirCache.FindRoot(ctx, true)
 
 	// discover new directories
 	tasks := make(map[string]createDirTask)
@@ -1801,13 +1802,14 @@ func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (coun
 	wg := sync.WaitGroup{}
 	toBeCreated := make(chan createDirTask, len(tasks))
 	created := make(chan createDirTask)
-	errs := make(chan error)
+	failed := make(chan createDirTask)
+	ctx, cancel := context.WithCancel(ctx)
 
 	processing := make(map[string]struct{})
 	cb := func(t createDirTask) (done bool, err error) {
-		defer func() {
-			wg.Done()
-		}()
+		// defer func() {
+		// 	wg.Done()
+		// }()
 
 		if _, ok := f.dirCache.Get(t.path); ok {
 			return true, nil
@@ -1840,14 +1842,15 @@ func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (coun
 	}
 
 	// start workers
+	wg.Add(fs.Config.Transfers)
 	for i := 0; i < fs.Config.Transfers; i++ {
-		go f.createDirsRunner(ctx, &wg, toBeCreated, created, errs, cb)
+		go f.createDirsRunner(ctx, &wg, toBeCreated, created, failed, cb)
 	}
 
 	// add tasks (parent existed)
 	for _, t := range tasks {
 		if _, ok := f.dirCache.Get(t.parent); ok {
-			wg.Add(1)
+			// wg.Add(1)
 			toBeCreated <- t
 		}
 	}
@@ -1860,19 +1863,30 @@ Loop:
 			count = count + 1
 
 			delete(tasks, t.path)
-			fs.Infof(nil, "%s: Directory Created (Pending: %d)", t.path, len(tasks))
+			fs.Infof(nil, "%s: Directory created (Pending: %d)", t.path, len(tasks))
 			if len(tasks) == 0 {
 				break Loop
 			}
 
-			for _, tt := range tasks {
-				if tt.parent == t.path {
-					wg.Add(1)
-					toBeCreated <- tt
+			for _, childTask := range tasks {
+				if childTask.parent == t.path {
+					// wg.Add(1)
+					toBeCreated <- childTask
 				}
 			}
-		case err = <-errs:
-			return count, err
+		case t := <-failed:
+			if t.err != nil{
+				err = t.err
+				
+				fs.Errorf(nil, "Cancelling create directories due to error: %v", err)
+				cancel()
+				t.retries = t.retries + 1
+			}else{			
+				time.Sleep(time.Duration(100*t.depth+(t.retries+1)*rand.Intn(100)) * time.Millisecond)	
+				toBeCreated <- t
+			}
+		case <-ctx.Done():		
+			break Loop
 		}
 	}
 
@@ -1880,7 +1894,7 @@ Loop:
 	close(toBeCreated)
 	// close(created)
 
-	return count, nil
+	return count, err
 }
 
 // isAuthOwned checks if any of the item owners is the authenticated owner
@@ -3296,7 +3310,7 @@ func (f *Fs) changeServiceAccountFile(file string) (err error) {
 		return errors.Wrap(err, "drive: failed when making oauth client")
 	}
 
-	f.pacer =  fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(f.opt.PacerMinSleep), pacer.Burst(f.opt.PacerBurst)))
+	f.pacer = fs.NewPacer(pacer.NewGoogleDrive(pacer.MinSleep(f.opt.PacerMinSleep), pacer.Burst(f.opt.PacerBurst)))
 
 	f.client = oAuthClient
 	f.svc, err = drive.New(f.client)
