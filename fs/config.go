@@ -44,6 +44,7 @@ type ConfigInfo struct {
 	StatsLogLevel          LogLevel
 	UseJSONLog             bool
 	DryRun                 bool
+	Interactive            bool
 	CheckSum               bool
 	SizeOnly               bool
 	IgnoreTimes            bool
@@ -82,6 +83,7 @@ type ConfigInfo struct {
 	UseListR               bool
 	BufferSize             SizeSuffix
 	BwLimit                BwTimetable
+	BwLimitFile            BwTimetable
 	TPSLimit               float64
 	TPSLimitBurst          int
 	BindAddr               net.IP
@@ -116,6 +118,7 @@ type ConfigInfo struct {
 	UploadHeaders          []*HTTPOption
 	DownloadHeaders        []*HTTPOption
 	Headers                []*HTTPOption
+	RefreshTimes           bool
 }
 
 // NewConfig creates a new config with everything set to the default

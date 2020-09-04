@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/lib/encoder"
+	"github.com/rclone/rclone/lib/env"
 	"github.com/rclone/rclone/lib/jwtutil"
 
 	"github.com/youmark/pkcs8"
@@ -86,33 +87,33 @@ func init() {
 		Config: func(name string, m configmap.Mapper) {
 			jsonFile, ok := m.Get("box_config_file")
 			boxSubType, boxSubTypeOk := m.Get("box_sub_type")
+			boxAccessToken, boxAccessTokenOk := m.Get("access_token")
 			var err error
+			// If using box config.json, use JWT auth
 			if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
 				err = refreshJWTToken(jsonFile, boxSubType, name, m)
 				if err != nil {
 					log.Fatalf("Failed to configure token with jwt authentication: %v", err)
 				}
-			} else {
+				// Else, if not using an access token, use oauth2
+			} else if boxAccessToken == "" || !boxAccessTokenOk {
 				err = oauthutil.Config("box", name, m, oauthConfig, nil)
 				if err != nil {
 					log.Fatalf("Failed to configure token with oauth authentication: %v", err)
 				}
 			}
 		},
-		Options: []fs.Option{{
-			Name: config.ConfigClientID,
-			Help: "Box App Client Id.\nLeave blank normally.",
-		}, {
-			Name: config.ConfigClientSecret,
-			Help: "Box App Client Secret\nLeave blank normally.",
-		}, {
+		Options: append(oauthutil.SharedOptions, []fs.Option{{
 			Name:     "root_folder_id",
 			Help:     "Fill in for rclone to use a non root folder as its starting point.",
 			Default:  "0",
 			Advanced: true,
 		}, {
 			Name: "box_config_file",
-			Help: "Box App config.json location\nLeave blank normally.",
+			Help: "Box App config.json location\nLeave blank normally." + env.ShellExpandHelp,
+		}, {
+			Name: "access_token",
+			Help: "Box App Primary Access Token\nLeave blank normally.",
 		}, {
 			Name:    "box_sub_type",
 			Default: "user",
@@ -148,11 +149,12 @@ func init() {
 				encoder.EncodeBackSlash |
 				encoder.EncodeRightSpace |
 				encoder.EncodeInvalidUtf8),
-		}},
+		}}...),
 	})
 }
 
 func refreshJWTToken(jsonFile string, boxSubType string, name string, m configmap.Mapper) error {
+	jsonFile = env.ShellExpand(jsonFile)
 	boxConfig, err := getBoxConfig(jsonFile)
 	if err != nil {
 		log.Fatalf("Failed to configure token: %v", err)
@@ -245,6 +247,7 @@ type Options struct {
 	CommitRetries int                  `config:"commit_retries"`
 	Enc           encoder.MultiEncoder `config:"encoding"`
 	RootFolderID  string               `config:"root_folder_id"`
+	AccessToken   string               `config:"access_token"`
 }
 
 // Fs represents a remote box
@@ -327,7 +330,7 @@ func shouldRetry(resp *http.Response, err error) (bool, error) {
 // readMetaDataForPath reads the metadata from the path
 func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.Item, err error) {
 	// defer fs.Trace(f, "path=%q", path)("info=%+v, err=%v", &info, &err)
-	leaf, directoryID, err := f.dirCache.FindRootAndPath(ctx, path, false)
+	leaf, directoryID, err := f.dirCache.FindPath(ctx, path, false)
 	if err != nil {
 		if err == fs.ErrorDirNotFound {
 			return nil, fs.ErrorObjectNotFound
@@ -383,16 +386,22 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	}
 
 	root = parsePath(root)
-	oAuthClient, ts, err := oauthutil.NewClient(name, m, oauthConfig)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure Box")
+
+	client := fshttp.NewClient(fs.Config)
+	var ts *oauthutil.TokenSource
+	// If not using an accessToken, create an oauth client and tokensource
+	if opt.AccessToken == "" {
+		client, ts, err = oauthutil.NewClient(name, m, oauthConfig)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to configure Box")
+		}
 	}
 
 	f := &Fs{
 		name:        name,
 		root:        root,
 		opt:         *opt,
-		srv:         rest.NewClient(oAuthClient).SetRoot(rootURL),
+		srv:         rest.NewClient(client).SetRoot(rootURL),
 		pacer:       fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 		uploadToken: pacer.NewTokenDispenser(fs.Config.Transfers),
 	}
@@ -402,23 +411,30 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 	}).Fill(f)
 	f.srv.SetErrorHandler(errorHandler)
 
+	// If using an accessToken, set the Authorization header
+	if f.opt.AccessToken != "" {
+		f.srv.SetHeader("Authorization", "Bearer "+f.opt.AccessToken)
+	}
+
 	jsonFile, ok := m.Get("box_config_file")
 	boxSubType, boxSubTypeOk := m.Get("box_sub_type")
 
-	// If using box config.json and JWT, renewing should just refresh the token and
-	// should do so whether there are uploads pending or not.
-	if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
-		f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
-			err := refreshJWTToken(jsonFile, boxSubType, name, m)
-			return err
-		})
-		f.tokenRenewer.Start()
-	} else {
-		// Renew the token in the background
-		f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
-			_, err := f.readMetaDataForPath(ctx, "")
-			return err
-		})
+	if ts != nil {
+		// If using box config.json and JWT, renewing should just refresh the token and
+		// should do so whether there are uploads pending or not.
+		if ok && boxSubTypeOk && jsonFile != "" && boxSubType != "" {
+			f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
+				err := refreshJWTToken(jsonFile, boxSubType, name, m)
+				return err
+			})
+			f.tokenRenewer.Start()
+		} else {
+			// Renew the token in the background
+			f.tokenRenewer = oauthutil.NewRenew(f.String(), ts, func() error {
+				_, err := f.readMetaDataForPath(ctx, "")
+				return err
+			})
+		}
 	}
 
 	// Get rootFolderID
@@ -615,10 +631,6 @@ OUTER:
 // This should return ErrDirNotFound if the directory isn't
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	err = f.dirCache.FindRoot(ctx, false)
-	if err != nil {
-		return nil, err
-	}
 	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
 	if err != nil {
 		return nil, err
@@ -659,7 +671,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 // Used to create new objects
 func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time, size int64) (o *Object, leaf string, directoryID string, err error) {
 	// Create the directory for the object if it doesn't exist
-	leaf, directoryID, err = f.dirCache.FindRootAndPath(ctx, remote, true)
+	leaf, directoryID, err = f.dirCache.FindPath(ctx, remote, true)
 	if err != nil {
 		return
 	}
@@ -715,13 +727,7 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 
 // Mkdir creates the container if it doesn't exist
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
-	err := f.dirCache.FindRoot(ctx, true)
-	if err != nil {
-		return err
-	}
-	if dir != "" {
-		_, err = f.dirCache.FindDir(ctx, dir, true)
-	}
+	_, err := f.dirCache.FindDir(ctx, dir, true)
 	return err
 }
 
@@ -746,10 +752,6 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 		return errors.New("can't purge root directory")
 	}
 	dc := f.dirCache
-	err := dc.FindRoot(ctx, false)
-	if err != nil {
-		return err
-	}
 	rootID, err := dc.FindDir(ctx, dir, false)
 	if err != nil {
 		return err
@@ -854,8 +856,8 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 // Optional interface: Only implement this if you have a way of
 // deleting all the files quicker than just running Remove() on the
 // result of List()
-func (f *Fs) Purge(ctx context.Context) error {
-	return f.purgeCheck(ctx, "", false)
+func (f *Fs) Purge(ctx context.Context, dir string) error {
+	return f.purgeCheck(ctx, dir, false)
 }
 
 // move a file or folder
@@ -956,64 +958,14 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		fs.Debugf(srcFs, "Can't move directory - not same remote type")
 		return fs.ErrorCantDirMove
 	}
-	srcPath := path.Join(srcFs.root, srcRemote)
-	dstPath := path.Join(f.root, dstRemote)
 
-	// Refuse to move to or from the root
-	if srcPath == "" || dstPath == "" {
-		fs.Debugf(src, "DirMove error: Can't move root")
-		return errors.New("can't move root directory")
-	}
-
-	// find the root src directory
-	err := srcFs.dirCache.FindRoot(ctx, false)
-	if err != nil {
-		return err
-	}
-
-	// find the root dst directory
-	if dstRemote != "" {
-		err = f.dirCache.FindRoot(ctx, true)
-		if err != nil {
-			return err
-		}
-	} else {
-		if f.dirCache.FoundRoot() {
-			return fs.ErrorDirExists
-		}
-	}
-
-	// Find ID of dst parent, creating subdirs if necessary
-	var leaf, directoryID string
-	findPath := dstRemote
-	if dstRemote == "" {
-		findPath = f.root
-	}
-	leaf, directoryID, err = f.dirCache.FindPath(ctx, findPath, true)
-	if err != nil {
-		return err
-	}
-
-	// Check destination does not exist
-	if dstRemote != "" {
-		_, err = f.dirCache.FindDir(ctx, dstRemote, false)
-		if err == fs.ErrorDirNotFound {
-			// OK
-		} else if err != nil {
-			return err
-		} else {
-			return fs.ErrorDirExists
-		}
-	}
-
-	// Find ID of src
-	srcID, err := srcFs.dirCache.FindDir(ctx, srcRemote, false)
+	srcID, _, _, dstDirectoryID, dstLeaf, err := f.dirCache.DirMove(ctx, srcFs.dirCache, srcFs.root, srcRemote, f.root, dstRemote)
 	if err != nil {
 		return err
 	}
 
 	// Do the move
-	_, err = f.move(ctx, "/folders/", srcID, leaf, directoryID)
+	_, err = f.move(ctx, "/folders/", srcID, dstLeaf, dstDirectoryID)
 	if err != nil {
 		return err
 	}
@@ -1022,7 +974,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 }
 
 // PublicLink adds a "readable by anyone with link" permission on the given file or folder.
-func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
+func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (string, error) {
 	id, err := f.dirCache.FindDir(ctx, remote, false)
 	var opts rest.Opts
 	if err == nil {
@@ -1059,6 +1011,66 @@ func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
 		return shouldRetry(resp, err)
 	})
 	return info.SharedLink.URL, err
+}
+
+// deletePermanently permenently deletes a trashed file
+func (f *Fs) deletePermanently(ctx context.Context, itemType, id string) error {
+	opts := rest.Opts{
+		Method:     "DELETE",
+		NoResponse: true,
+	}
+	if itemType == api.ItemTypeFile {
+		opts.Path = "/files/" + id + "/trash"
+	} else {
+		opts.Path = "/folders/" + id + "/trash"
+	}
+	return f.pacer.Call(func() (bool, error) {
+		resp, err := f.srv.Call(ctx, &opts)
+		return shouldRetry(resp, err)
+	})
+}
+
+// CleanUp empties the trash
+func (f *Fs) CleanUp(ctx context.Context) (err error) {
+	opts := rest.Opts{
+		Method: "GET",
+		Path:   "/folders/trash/items",
+		Parameters: url.Values{
+			"fields": []string{"type", "id"},
+		},
+	}
+	opts.Parameters.Set("limit", strconv.Itoa(listChunks))
+	offset := 0
+	for {
+		opts.Parameters.Set("offset", strconv.Itoa(offset))
+
+		var result api.FolderItems
+		var resp *http.Response
+		err = f.pacer.Call(func() (bool, error) {
+			resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
+			return shouldRetry(resp, err)
+		})
+		if err != nil {
+			return errors.Wrap(err, "couldn't list trash")
+		}
+		for i := range result.Entries {
+			item := &result.Entries[i]
+			if item.Type == api.ItemTypeFolder || item.Type == api.ItemTypeFile {
+				err := f.deletePermanently(ctx, item.Type, item.ID)
+				if err != nil {
+					return errors.Wrap(err, "failed to delete file")
+				}
+			} else {
+				fs.Debugf(f, "Ignoring %q - unknown type %q", item.Name, item.Type)
+				continue
+			}
+		}
+		offset += result.Limit
+		if offset >= result.TotalCount {
+			break
+		}
+	}
+	return
 }
 
 // DirCacheFlush resets the directory cache - used in testing as an
@@ -1260,15 +1272,17 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 //
 // The new object may have been created if an error is returned
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
-	o.fs.tokenRenewer.Start()
-	defer o.fs.tokenRenewer.Stop()
+	if o.fs.tokenRenewer != nil {
+		o.fs.tokenRenewer.Start()
+		defer o.fs.tokenRenewer.Stop()
+	}
 
 	size := src.Size()
 	modTime := src.ModTime(ctx)
 	remote := o.Remote()
 
 	// Create the directory for the object if it doesn't exist
-	leaf, directoryID, err := o.fs.dirCache.FindRootAndPath(ctx, remote, true)
+	leaf, directoryID, err := o.fs.dirCache.FindPath(ctx, remote, true)
 	if err != nil {
 		return err
 	}
@@ -1303,6 +1317,7 @@ var (
 	_ fs.DirMover        = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
+	_ fs.CleanUpper      = (*Fs)(nil)
 	_ fs.Object          = (*Object)(nil)
 	_ fs.IDer            = (*Object)(nil)
 )

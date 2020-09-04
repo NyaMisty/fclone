@@ -41,9 +41,18 @@ client_secret>
 Box App config.json location
 Leave blank normally.
 Enter a string value. Press Enter for the default ("").
-config_json>
-'enterprise' or 'user' depending on the type of token being requested.
+box_config_file>
+Box App Primary Access Token
+Leave blank normally.
+Enter a string value. Press Enter for the default ("").
+access_token>
+
 Enter a string value. Press Enter for the default ("user").
+Choose a number from below, or type in your own value
+ 1 / Rclone should act on behalf of a user
+   \ "user"
+ 2 / Rclone should act on behalf of a service account
+   \ "enterprise"
 box_sub_type>
 Remote config
 Use auto config?
@@ -226,6 +235,12 @@ normally 8MB so increasing `--transfers` will increase memory use.
 Depending on the enterprise settings for your user, the item will
 either be actually deleted from Box or moved to the trash.
 
+Emptying the trash is supported via the rclone however cleanup command
+however this deletes every trashed file and folder individually so it
+may take a very long time. 
+Emptying the trash via the  WebUI does not have this limitation 
+so it is advised to empty the trash via the WebUI.
+
 ### Root folder ID ###
 
 You can set the `root_folder_id` for rclone.  This is the directory
@@ -255,7 +270,7 @@ Here are the standard options specific to box (Box).
 
 #### --box-client-id
 
-Box App Client Id.
+OAuth Client Id
 Leave blank normally.
 
 - Config:      client_id
@@ -265,7 +280,7 @@ Leave blank normally.
 
 #### --box-client-secret
 
-Box App Client Secret
+OAuth Client Secret
 Leave blank normally.
 
 - Config:      client_secret
@@ -278,8 +293,21 @@ Leave blank normally.
 Box App config.json location
 Leave blank normally.
 
+Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
+
+
 - Config:      box_config_file
 - Env Var:     RCLONE_BOX_BOX_CONFIG_FILE
+- Type:        string
+- Default:     ""
+
+#### --box-access-token
+
+Box App Primary Access Token
+Leave blank normally.
+
+- Config:      access_token
+- Env Var:     RCLONE_BOX_ACCESS_TOKEN
 - Type:        string
 - Default:     ""
 
@@ -300,6 +328,35 @@ Leave blank normally.
 ### Advanced Options
 
 Here are the advanced options specific to box (Box).
+
+#### --box-token
+
+OAuth Access Token as a JSON blob.
+
+- Config:      token
+- Env Var:     RCLONE_BOX_TOKEN
+- Type:        string
+- Default:     ""
+
+#### --box-auth-url
+
+Auth server URL.
+Leave blank to use the provider defaults.
+
+- Config:      auth_url
+- Env Var:     RCLONE_BOX_AUTH_URL
+- Type:        string
+- Default:     ""
+
+#### --box-token-url
+
+Token server url.
+Leave blank to use the provider defaults.
+
+- Config:      token_url
+- Env Var:     RCLONE_BOX_TOKEN_URL
+- Type:        string
+- Default:     ""
 
 #### --box-root-folder-id
 

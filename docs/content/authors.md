@@ -378,3 +378,34 @@ put them back in again.` >}}
   * Brandon McNama <bmcnama@pagerduty.com>
   * Daniel Slyman <github@skylayer.eu>
   * Alex Guerrero <guerrero@users.noreply.github.com>
+  * Matteo Pietro Dazzi <matteopietro.dazzi@gft.com>
+  * edwardxml <56691903+edwardxml@users.noreply.github.com>
+  * Roman Kredentser <shareed2k@gmail.com>
+  * Kamil Trzciński <ayufan@ayufan.eu>
+  * Zac Rubin <z-0@users.noreply.github.com>
+  * Vincent Feltz <psycho@feltzv.fr>
+  * Heiko Bornholdt <bornholdt@informatik.uni-hamburg.de>
+  * Matteo Pietro Dazzi <matteopietro.dazzi@gmail.com>
+  * jtagcat <gitlab@c7.ee>
+  * Petri Salminen <petri@salminen.dev>
+  * Tim Burke <tim.burke@gmail.com>
+  * Kai Lüke <kai@kinvolk.io>
+  * Garrett Squire <github@garrettsquire.com>
+  * Evan Harris <eharris@puremagic.com>
+  * Kevin <keyam@microsoft.com>
+  * Morten Linderud <morten@linderud.pw>
+  * Dmitry Ustalov <dmitry.ustalov@gmail.com>
+  * Jack <196648+jdeng@users.noreply.github.com>
+  * kcris <cristian.tarsoaga@gmail.com>
+  * tyhuber1 <68970760+tyhuber1@users.noreply.github.com>
+  * David Ibarra <david.ibarra@realty.com>
+  * Tim Gallant <tim@lilt.com>
+  * Kaloyan Raev <kaloyan@storj.io>
+  * Jay McEntire <jay.mcentire@gmail.com>
+  * Leo Luan <leoluan@us.ibm.com>
+  * aus <549081+aus@users.noreply.github.com>
+  * Aaron Gokaslan <agokaslan@fb.com>
+  * Egor Margineanu <egmar@users.noreply.github.com>
+  * Lucas Kanashiro <lucas.kanashiro@canonical.com>
+  * WarpedPixel <WarpedPixel@users.noreply.github.com>
+  * Sam Edwards <sam@samedwards.ca>

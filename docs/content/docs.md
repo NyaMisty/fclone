@@ -73,6 +73,9 @@ storage system in the config file then the sub path, eg
 
 You can define as many storage paths as you like in the config file.
 
+Please use the [`-i` / `--interactive`](#interactive) flag while
+learning rclone to avoid accidental data loss.
+
 Subcommands
 -----------
 
@@ -80,7 +83,7 @@ rclone uses a system of subcommands.  For example
 
     rclone ls remote:path # lists a remote
     rclone copy /local/path remote:path # copies /local/path to the remote
-    rclone sync /local/path remote:path # syncs /local/path to the remote
+    rclone sync -i /local/path remote:path # syncs /local/path to the remote
 
 The main rclone commands with most used first
 
@@ -200,6 +203,11 @@ To copy files and directories in `https://example.com/path/to/dir` to `/tmp/dir`
 To copy files and directories from `example.com` in the relative
 directory `path/to/dir` to `/tmp/dir` using sftp.
 
+### Valid remote names
+
+ - Remote names may only contain 0-9, A-Z ,a-z ,_ , - and space.
+ - Remote names may not start with -.
+
 Quoting and the shell
 ---------------------
 
@@ -246,11 +254,11 @@ file or directory like this then use the full path starting with a
 
 So to sync a directory called `sync:me` to a remote called `remote:` use
 
-    rclone sync ./sync:me remote:path
+    rclone sync -i ./sync:me remote:path
 
 or
 
-    rclone sync /full/path/to/sync:me remote:path
+    rclone sync -i /full/path/to/sync:me remote:path
 
 Server Side Copy
 ----------------
@@ -283,8 +291,8 @@ same.
 
 This can be used when scripting to make aged backups efficiently, eg
 
-    rclone sync remote:current-backup remote:previous-backup
-    rclone sync /path/to/files remote:current-backup
+    rclone sync -i remote:current-backup remote:previous-backup
+    rclone sync -i /path/to/files remote:current-backup
 
 Options
 -------
@@ -326,7 +334,7 @@ directory must not overlap the destination directory.
 
 For example
 
-    rclone sync /path/to/local remote:current --backup-dir remote:old
+    rclone sync -i /path/to/local remote:current --backup-dir remote:old
 
 will sync `/path/to/local` to `remote:current`, but for any files
 which would have been updated or deleted will be stored in
@@ -413,6 +421,20 @@ If you configure rclone with a [remote control](/rc) then you can use
 change the bwlimit dynamically:
 
     rclone rc core/bwlimit rate=1M
+
+### --bwlimit-file=BANDWIDTH_SPEC ###
+
+This option controls per file bandwidth limit. For the options see the
+`--bwlimit` flag.
+
+For example use this to allow no transfers to be faster than 1MByte/s
+
+    --bwlimit-file 1M
+
+This can be used in conjunction with `--bwlimit`.
+
+Note that if a schedule is provided the file will use the schedule in
+effect at the start of the transfer.
 
 ### --buffer-size=SIZE ###
 
@@ -601,7 +623,7 @@ Add an HTTP header for all download transactions. The flag can be repeated to
 add multiple headers.
 
 ```
-rclone sync s3:test/src ~/dst --header-download "X-Amz-Meta-Test: Foo" --header-download "X-Amz-Meta-Test2: Bar"
+rclone sync -i s3:test/src ~/dst --header-download "X-Amz-Meta-Test: Foo" --header-download "X-Amz-Meta-Test2: Bar"
 ```
 
 See the GitHub issue [here](https://github.com/rclone/rclone/issues/59) for
@@ -613,7 +635,7 @@ Add an HTTP header for all upload transactions. The flag can be repeated to add
 multiple headers.
 
 ```
-rclone sync ~/src s3:test/dst --header-upload "Content-Disposition: attachment; filename='cool.html'" --header-upload "X-Amz-Meta-Test: FooBar"
+rclone sync -i ~/src s3:test/dst --header-upload "Content-Disposition: attachment; filename='cool.html'" --header-upload "X-Amz-Meta-Test: FooBar"
 ```
 
 See the GitHub issue [here](https://github.com/rclone/rclone/issues/59) for
@@ -686,7 +708,45 @@ This can be useful as an additional layer of protection for immutable
 or append-only data sets (notably backup archives), where modification
 implies corruption and should not be propagated.
 
-## --leave-root ###
+### -i / --interactive {#interactive}
+
+This flag can be used to tell rclone that you wish a manual
+confirmation before destructive operations.
+
+It is **recommended** that you use this flag while learning rclone
+especially with `rclone sync`.
+
+For example
+
+```
+$ rclone delete -i /tmp/dir
+rclone: delete "important-file.txt"?
+y) Yes, this is OK (default)
+n) No, skip this
+s) Skip all delete operations with no more questions
+!) Do all delete operations with no more questions
+q) Exit rclone now.
+y/n/s/!/q> n
+```
+
+The options mean
+
+- `y`: **Yes**, this operation should go ahead. You can also press Return
+  for this to happen. You'll be asked every time unless you choose `s`
+  or `!`.
+- `n`: **No**, do not do this operation. You'll be asked every time unless
+  you choose `s` or `!`.
+- `s`: **Skip** all the following operations of this type with no more
+  questions. This takes effect until rclone exits. If there are any
+  different kind of operations you'll be prompted for them.
+- `!`: **Do all** the following operations with no more
+  questions. Useful if you've decided that you don't mind rclone doing
+  that kind of operation. This takes effect until rclone exits . If
+  there are any different kind of operations you'll be prompted for
+  them.
+- `q`: **Quit** rclone now, just in case!
+
+### --leave-root ####
 
 During rmdirs it will not remove root directory, even if it's empty.
 
@@ -1050,6 +1110,41 @@ is fixed all non-ASCII characters will be replaced with `.` when
 
 This flag will limit rclone's output to error messages only.
 
+### --refresh-times ###
+
+The `--refresh-times` flag can be used to update modification times of
+existing files when they are out of sync on backends which don't
+support hashes.
+
+This is useful if you uploaded files with the incorrect timestamps and
+you now wish to correct them.
+
+This flag is **only** useful for destinations which don't support
+hashes (eg `crypt`).
+
+This can be used any of the sync commands `sync`, `copy` or `move`.
+
+To use this flag you will need to be doing a modification time sync
+(so not using `--size-only` or `--checksum`). The flag will have no
+effect when using `--size-only` or `--checksum`.
+
+If this flag is used when rclone comes to upload a file it will check
+to see if there is an existing file on the destination. If this file
+matches the source with size (and checksum if available) but has a
+differing timestamp then instead of re-uploading it, rclone will
+update the timestamp on the destination file. If the checksum does not
+match rclone will upload the new file. If the checksum is absent (eg
+on a `crypt` backend) then rclone will update the timestamp.
+
+Note that some remotes can't set the modification time without
+re-uploading the file so this flag is less useful on them.
+
+Normally if you are doing a modification time sync rclone will update
+modification times without `--refresh-times` provided that the remote
+supports checksums **and** the checksums match on the file. However if the
+checksums are absent then rclone will upload the file rather than
+setting the timestamp as this is the safe behaviour.
+
 ### --retries int ###
 
 Retry the entire sync if it fails this many times it fails (default 3).
@@ -1156,7 +1251,7 @@ or with `--backup-dir`. See `--backup-dir` for more info.
 
 For example
 
-    rclone sync /path/to/local/file remote:current --suffix .bak
+    rclone sync -i /path/to/local/file remote:current --suffix .bak
 
 will sync `/path/to/local` to `remote:current`, but for any files
 which would have been updated or deleted have .bak added.
@@ -1233,8 +1328,10 @@ will be considered.
 
 If the destination does not support server-side copy or move, rclone
 will fall back to the default behaviour and log an error level message
-to the console. Note: Encrypted destinations are not supported
-by `--track-renames`.
+to the console.
+
+Encrypted destinations are not currently supported by `--track-renames`
+if `--track-renames-strategy` includes `hash`.
 
 Note that `--track-renames` is incompatible with `--no-traverse` and
 that it uses extra memory to keep track of all the rename candidates.
@@ -1243,13 +1340,27 @@ Note also that `--track-renames` is incompatible with
 `--delete-before` and will select `--delete-after` instead of
 `--delete-during`.
 
-### --track-renames-strategy (hash,modtime) ###
+### --track-renames-strategy (hash,modtime,leaf,size) ###
 
-This option changes the matching criteria for `--track-renames` to match
-by any combination of modtime, hash, size. Matching by size is always enabled
-no matter what option is selected here. This also means
-that it enables `--track-renames` support for encrypted destinations.
-If nothing is specified, the default option is matching by hashes.
+This option changes the matching criteria for `--track-renames`.
+
+The matching is controlled by a comma separated selection of these tokens:
+
+- `modtime` - the modification time of the file - not supported on all backends
+- `hash` - the hash of the file contents - not supported on all backends
+- `leaf` - the name of the file not including its directory name
+- `size` - the size of the file (this is always enabled)
+
+So using `--track-renames-strategy modtime,leaf` would match files
+based on modification time, the leaf of the file name and the size
+only.
+
+Using `--track-renames-strategy modtime` or `leaf` can enable
+`--track-renames` support for encrypted destinations.
+
+If nothing is specified, the default option is matching by `hash`es.
+
+Note that the `hash` strategy is not supported with encrypted destinations.
 
 ### --delete-(before,during,after) ###
 
@@ -1768,9 +1879,31 @@ mys3:
 Note that if you want to create a remote using environment variables
 you must create the `..._TYPE` variable as above.
 
+### Precedence
+
+The various different methods of backend configuration are read in
+this order and the first one with a value is used.
+
+- Flag values as supplied on the command line, eg `--drive-use-trash`.
+- Remote specific environment vars, eg `RCLONE_CONFIG_MYREMOTE_USE_TRASH` (see above).
+- Backend specific environment vars, eg `RCLONE_DRIVE_USE_TRASH`.
+- Config file, eg `use_trash = false`.
+- Default values, eg `true` - these can't be changed.
+
+So if both `--drive-use-trash` is supplied on the config line and an
+environment variable `RCLONE_DRIVE_USE_TRASH` is set, the command line
+flag will take preference.
+
+For non backend configuration the order is as follows:
+
+- Flag values as supplied on the command line, eg `--stats 5s`.
+- Environment vars, eg `RCLONE_STATS=5s`.
+- Default values, eg `1m` - these can't be changed.
+
 ### Other environment variables ###
 
-  * `RCLONE_CONFIG_PASS` set to contain your config file password (see [Configuration Encryption](#configuration-encryption) section)
-  * `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (or the lowercase versions thereof).
-    * `HTTPS_PROXY` takes precedence over `HTTP_PROXY` for https requests.
-    * The environment values may be either a complete URL or a "host[:port]" for, in which case the "http" scheme is assumed.
+- `RCLONE_CONFIG_PASS` set to contain your config file password (see [Configuration Encryption](#configuration-encryption) section)
+- `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (or the lowercase versions thereof).
+    - `HTTPS_PROXY` takes precedence over `HTTP_PROXY` for https requests.
+    - The environment values may be either a complete URL or a "host[:port]" for, in which case the "http" scheme is assumed.
+- `RCLONE_CONFIG_DIR` - rclone **sets** this variable for use in config files and sub processes to point to the directory holding the config file.

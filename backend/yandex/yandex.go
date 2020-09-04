@@ -67,18 +67,7 @@ func init() {
 				return
 			}
 		},
-		Options: []fs.Option{{
-			Name: config.ConfigClientID,
-			Help: "Yandex Client Id\nLeave blank normally.",
-		}, {
-			Name: config.ConfigClientSecret,
-			Help: "Yandex Client Secret\nLeave blank normally.",
-		}, {
-			Name:     "unlink",
-			Help:     "Remove existing public link to file/folder with link command rather than creating.\nDefault is false, meaning link command will create or retrieve public link.",
-			Default:  false,
-			Advanced: true,
-		}, {
+		Options: append(oauthutil.SharedOptions, []fs.Option{{
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -86,15 +75,14 @@ func init() {
 			// it doesn't seem worth making an exception for this
 			Default: (encoder.Display |
 				encoder.EncodeInvalidUtf8),
-		}},
+		}}...),
 	})
 }
 
 // Options defines the configuration for this backend
 type Options struct {
-	Token  string               `config:"token"`
-	Unlink bool                 `config:"unlink"`
-	Enc    encoder.MultiEncoder `config:"encoding"`
+	Token string               `config:"token"`
+	Enc   encoder.MultiEncoder `config:"encoding"`
 }
 
 // Fs represents a remote yandex
@@ -643,13 +631,13 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	return f.purgeCheck(ctx, dir, true)
 }
 
-// Purge deletes all the files and the container
+// Purge deletes all the files in the directory
 //
 // Optional interface: Only implement this if you have a way of
 // deleting all the files quicker than just running Remove() on the
 // result of List()
-func (f *Fs) Purge(ctx context.Context) error {
-	return f.purgeCheck(ctx, "", false)
+func (f *Fs) Purge(ctx context.Context, dir string) error {
+	return f.purgeCheck(ctx, dir, false)
 }
 
 // copyOrMoves copies or moves directories or files depending on the method parameter
@@ -801,9 +789,9 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 }
 
 // PublicLink generates a public link to the remote path (usually readable by anyone)
-func (f *Fs) PublicLink(ctx context.Context, remote string) (link string, err error) {
+func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (link string, err error) {
 	var path string
-	if f.opt.Unlink {
+	if unlink {
 		path = "/resources/unpublish"
 	} else {
 		path = "/resources/publish"
@@ -830,7 +818,7 @@ func (f *Fs) PublicLink(ctx context.Context, remote string) (link string, err er
 		}
 	}
 	if err != nil {
-		if f.opt.Unlink {
+		if unlink {
 			return "", errors.Wrap(err, "couldn't remove public link")
 		}
 		return "", errors.Wrap(err, "couldn't create public link")

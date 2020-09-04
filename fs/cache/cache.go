@@ -2,6 +2,7 @@
 package cache
 
 import (
+	"runtime"
 	"sync"
 
 	"github.com/rclone/rclone/fs"
@@ -14,9 +15,9 @@ var (
 	remap = map[string]string{} // map user supplied names to canonical names
 )
 
-// Lookup fsString in the mapping from user supplied names to
-// canonical names and return the canonical form
-func canonicalize(fsString string) string {
+// Canonicalize looks up fsString in the mapping from user supplied
+// names to canonical names and return the canonical form
+func Canonicalize(fsString string) string {
 	mu.Lock()
 	canonicalName, ok := remap[fsString]
 	mu.Unlock()
@@ -40,7 +41,7 @@ func addMapping(fsString, canonicalName string) {
 // GetFn gets an fs.Fs named fsString either from the cache or creates
 // it afresh with the create function
 func GetFn(fsString string, create func(fsString string) (fs.Fs, error)) (f fs.Fs, err error) {
-	fsString = canonicalize(fsString)
+	fsString = Canonicalize(fsString)
 	created := false
 	value, err := c.Get(fsString, func(fsString string) (f interface{}, ok bool, err error) {
 		f, err = create(fsString)
@@ -56,12 +57,20 @@ func GetFn(fsString string, create func(fsString string) (fs.Fs, error)) (f fs.F
 	if created {
 		canonicalName := fs.ConfigString(f)
 		if canonicalName != fsString {
-			fs.Debugf(nil, "fs cache: renaming cache item %q to be canonical %q", fsString, canonicalName)
-			value, found := c.Rename(fsString, canonicalName)
-			if found {
-				f = value.(fs.Fs)
+			// Note that if err == fs.ErrorIsFile at this moment
+			// then we can't rename the remote as it will have the
+			// wrong error status, we need to add a new one.
+			if err == nil {
+				fs.Debugf(nil, "fs cache: renaming cache item %q to be canonical %q", fsString, canonicalName)
+				value, found := c.Rename(fsString, canonicalName)
+				if found {
+					f = value.(fs.Fs)
+				}
+				addMapping(fsString, canonicalName)
+			} else {
+				fs.Debugf(nil, "fs cache: adding new entry for parent of %q, %q", fsString, canonicalName)
+				Put(canonicalName, f)
 			}
-			addMapping(fsString, canonicalName)
 		}
 	}
 	return f, err
@@ -70,6 +79,18 @@ func GetFn(fsString string, create func(fsString string) (fs.Fs, error)) (f fs.F
 // Pin f into the cache until Unpin is called
 func Pin(f fs.Fs) {
 	c.Pin(fs.ConfigString(f))
+}
+
+// PinUntilFinalized pins f into the cache until x is garbage collected
+//
+// This calls runtime.SetFinalizer on x so it shouldn't have a
+// finalizer already.
+func PinUntilFinalized(f fs.Fs, x interface{}) {
+	Pin(f)
+	runtime.SetFinalizer(x, func(_ interface{}) {
+		Unpin(f)
+	})
+
 }
 
 // Unpin f from the cache

@@ -36,7 +36,7 @@ Here is an overview of the major features of each cloud storage system.
 | Memory                       | MD5         | Yes     | No               | No              | -         |
 | Microsoft Azure Blob Storage | MD5         | Yes     | No               | No              | R/W       |
 | Microsoft OneDrive           | SHA1 ‡‡     | Yes     | Yes              | No              | R         |
-| OpenDrive                    | MD5         | Yes     | Yes              | No              | -         |
+| OpenDrive                    | MD5         | Yes     | Yes              | Partial \*      | -         |
 | OpenStack Swift              | MD5         | Yes     | No               | No              | R/W       |
 | pCloud                       | MD5, SHA1   | Yes     | No               | No              | W         |
 | premiumize.me                | -           | No      | Yes              | No              | R         |
@@ -116,6 +116,12 @@ objects with the same name.
 
 This confuses rclone greatly when syncing - use the `rclone dedupe`
 command to rename or remove duplicates.
+
+\* Opendrive does not support creation of duplicate files using
+their web client interface or other stock clients, but the underlying
+storage platform has been determined to allow duplicate files, and it
+is possible to create them with `rclone`.  It may be that this is a
+mistake or an unsupported feature.
 
 ### Restricted filenames ###
 
@@ -320,9 +326,9 @@ operations more efficient.
 | ---------------------------- |:-----:|:----:|:----:|:-------:|:-------:|:-----:|:------------:|:------------:|:-----:| :------: |
 | 1Fichier                     | No    | No   | No   | No      | No      | No    | No           | No           |   No  |  Yes |
 | Amazon Drive                 | Yes   | No   | Yes  | Yes     | No [#575](https://github.com/rclone/rclone/issues/575) | No  | No  | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | Yes |
-| Amazon S3                    | No    | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | No |
-| Backblaze B2                 | No    | Yes  | No   | No      | Yes     | Yes   | Yes          | Yes | No  | No |
-| Box                          | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/rclone/rclone/issues/575) | No  | Yes | Yes | No  | Yes |
+| Amazon S3                    | No    | Yes  | No   | No      | Yes     | Yes   | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | No |
+| Backblaze B2                 | No    | Yes  | No   | No      | Yes     | Yes   | Yes          | Yes          | No  | No |
+| Box                          | Yes   | Yes  | Yes  | Yes     | Yes ‡‡  | No    | Yes          | Yes          | No  | Yes |
 | Citrix ShareFile             | Yes   | Yes  | Yes  | Yes     | No      | No    | Yes          | No          | No  | Yes |
 | Dropbox                      | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/rclone/rclone/issues/575) | No  | Yes | Yes | Yes | Yes |
 | FTP                          | No    | No   | Yes  | Yes     | No      | No    | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | Yes |
@@ -336,10 +342,10 @@ operations more efficient.
 | Mega                         | Yes   | No   | Yes  | Yes     | Yes     | No    | No           | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | Yes |
 | Memory                       | No    | Yes  | No   | No      | No      | Yes   | Yes          | No          | No | No |
 | Microsoft Azure Blob Storage | Yes   | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | No |
-| Microsoft OneDrive           | Yes   | Yes  | Yes  | Yes     | No [#575](https://github.com/rclone/rclone/issues/575) | No | No | Yes | Yes | Yes |
+| Microsoft OneDrive           | Yes   | Yes  | Yes  | Yes     | Yes     | No    | No           | Yes | Yes | Yes |
 | OpenDrive                    | Yes   | Yes  | Yes  | Yes     | No      | No    | No           | No                                                    | No  | Yes |
 | OpenStack Swift              | Yes † | Yes  | No   | No      | No      | Yes   | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | No |
-| pCloud                       | Yes   | Yes  | Yes  | Yes     | Yes     | No    | No           | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | Yes |
+| pCloud                       | Yes   | Yes  | Yes  | Yes     | Yes     | No    | No           | Yes | Yes | Yes |
 | premiumize.me                | Yes   | No   | Yes  | Yes     | No      | No    | No           | Yes         | Yes | Yes |
 | put.io                       | Yes   | No   | Yes  | Yes     | Yes     | No    | Yes          | No [#2178](https://github.com/rclone/rclone/issues/2178) | Yes | Yes |
 | QingStor                     | No    | Yes  | No   | No      | Yes     | Yes   | No           | No [#2178](https://github.com/rclone/rclone/issues/2178) | No  | No |
@@ -394,6 +400,9 @@ This is used for emptying the trash for a remote by `rclone cleanup`.
 
 If the server can't do `CleanUp` then `rclone cleanup` will return an
 error.
+
+‡‡ Note that while Box implements this it has to delete every file
+idividually so it will be slower than emptying the trash via the WebUI
 
 ### ListR ###
 

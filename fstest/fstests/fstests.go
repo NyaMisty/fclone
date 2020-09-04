@@ -335,7 +335,8 @@ func Run(t *testing.T, opt *Opt) {
 	// Return true if f (or any of the things it wraps) is bucket
 	// based but not at the root.
 	isBucketBasedButNotRoot := func(f fs.Fs) bool {
-		return fs.UnWrapFs(f).Features().BucketBased && strings.Contains(strings.Trim(f.Root(), "/"), "/")
+		f = fs.UnWrapFs(f)
+		return f.Features().BucketBased && strings.Contains(strings.Trim(f.Root(), "/"), "/")
 	}
 
 	// Initialise the remote
@@ -974,6 +975,43 @@ func Run(t *testing.T, opt *Opt) {
 				assert.NotNil(t, err)
 			})
 
+			// TestFsPurge tests Purge
+			t.Run("FsPurge", func(t *testing.T) {
+				skipIfNotOk(t)
+
+				// Check have Purge
+				doPurge := remote.Features().Purge
+				if doPurge == nil {
+					t.Skip("FS has no Purge interface")
+				}
+
+				// put up a file to purge
+				fileToPurge := fstest.Item{
+					ModTime: fstest.Time("2001-02-03T04:05:06.499999999Z"),
+					Path:    "dirToPurge/fileToPurge.txt",
+				}
+				_, _ = testPut(ctx, t, remote, &fileToPurge)
+
+				fstest.CheckListingWithPrecision(t, remote, []fstest.Item{file1, file2, fileToPurge}, []string{
+					"dirToPurge",
+					"hello? sausage",
+					"hello? sausage/êé",
+					"hello? sausage/êé/Hello, 世界",
+					"hello? sausage/êé/Hello, 世界/ \" ' @ < > & ? + ≠",
+				}, fs.GetModifyWindow(remote))
+
+				// Now purge it
+				err = operations.Purge(ctx, remote, "dirToPurge")
+				require.NoError(t, err)
+
+				fstest.CheckListingWithPrecision(t, remote, []fstest.Item{file1, file2}, []string{
+					"hello? sausage",
+					"hello? sausage/êé",
+					"hello? sausage/êé/Hello, 世界",
+					"hello? sausage/êé/Hello, 世界/ \" ' @ < > & ? + ≠",
+				}, fs.GetModifyWindow(remote))
+			})
+
 			// TestFsCopy tests Copy
 			t.Run("FsCopy", func(t *testing.T) {
 				skipIfNotOk(t)
@@ -1466,38 +1504,40 @@ func Run(t *testing.T, opt *Opt) {
 					t.Skip("FS has no PublicLinker interface")
 				}
 
+				expiry := fs.Duration(60 * time.Second)
+
 				// if object not found
-				link, err := doPublicLink(ctx, file1.Path+"_does_not_exist")
+				link, err := doPublicLink(ctx, file1.Path+"_does_not_exist", expiry, false)
 				require.Error(t, err, "Expected to get error when file doesn't exist")
 				require.Equal(t, "", link, "Expected link to be empty on error")
 
 				// sharing file for the first time
-				link1, err := doPublicLink(ctx, file1.Path)
+				link1, err := doPublicLink(ctx, file1.Path, expiry, false)
 				require.NoError(t, err)
 				require.NotEqual(t, "", link1, "Link should not be empty")
 
-				link2, err := doPublicLink(ctx, file2.Path)
+				link2, err := doPublicLink(ctx, file2.Path, expiry, false)
 				require.NoError(t, err)
 				require.NotEqual(t, "", link2, "Link should not be empty")
 
 				require.NotEqual(t, link1, link2, "Links to different files should differ")
 
 				// sharing file for the 2nd time
-				link1, err = doPublicLink(ctx, file1.Path)
+				link1, err = doPublicLink(ctx, file1.Path, expiry, false)
 				require.NoError(t, err)
 				require.NotEqual(t, "", link1, "Link should not be empty")
 
 				// sharing directory for the first time
 				path := path.Dir(file2.Path)
-				link3, err := doPublicLink(ctx, path)
-				if err != nil && errors.Cause(err) == fs.ErrorCantShareDirectories {
+				link3, err := doPublicLink(ctx, path, expiry, false)
+				if err != nil && (errors.Cause(err) == fs.ErrorCantShareDirectories || errors.Cause(err) == fs.ErrorObjectNotFound) {
 					t.Log("skipping directory tests as not supported on this backend")
 				} else {
 					require.NoError(t, err)
 					require.NotEqual(t, "", link3, "Link should not be empty")
 
 					// sharing directory for the second time
-					link3, err = doPublicLink(ctx, path)
+					link3, err = doPublicLink(ctx, path, expiry, false)
 					require.NoError(t, err)
 					require.NotEqual(t, "", link3, "Link should not be empty")
 
@@ -1511,7 +1551,7 @@ func Run(t *testing.T, opt *Opt) {
 					_, err = subRemote.Put(ctx, buf, obji)
 					require.NoError(t, err)
 
-					link4, err := subRemote.Features().PublicLink(ctx, "")
+					link4, err := subRemote.Features().PublicLink(ctx, "", expiry, false)
 					require.NoError(t, err, "Sharing root in a sub-remote should work")
 					require.NotEqual(t, "", link4, "Link should not be empty")
 				}
@@ -1835,6 +1875,9 @@ func Run(t *testing.T, opt *Opt) {
 		if !isBucketBasedButNotRoot(remote) {
 			err = operations.Purge(ctx, remote, "")
 			assert.Error(t, err, "Expecting error after on second purge")
+			if errors.Cause(err) != fs.ErrorDirNotFound {
+				t.Log("Warning: this should produce fs.ErrorDirNotFound")
+			}
 		}
 
 	})

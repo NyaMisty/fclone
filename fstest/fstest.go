@@ -229,7 +229,7 @@ func makeListingFromObjects(objs []fs.Object) string {
 // filterEmptyDirs removes any empty (or containing only directories)
 // directories from expectedDirs
 func filterEmptyDirs(t *testing.T, items []Item, expectedDirs []string) (newExpectedDirs []string) {
-	dirs := map[string]struct{}{"": struct{}{}}
+	dirs := map[string]struct{}{"": {}}
 	for _, item := range items {
 		base := item.Path
 		for {
@@ -482,7 +482,7 @@ func Purge(f fs.Fs) {
 	if doPurge := f.Features().Purge; doPurge != nil {
 		doFallbackPurge = false
 		fs.Debugf(f, "Purge remote")
-		err = doPurge(ctx)
+		err = doPurge(ctx, "")
 		if err == fs.ErrorCantPurge {
 			doFallbackPurge = true
 		}

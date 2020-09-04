@@ -74,7 +74,7 @@ func init() {
 			Help: "Raw PEM-encoded private key, If specified, will override key_file parameter.",
 		}, {
 			Name: "key_file",
-			Help: "Path to PEM-encoded private key file, leave blank or set key-use-agent to use ssh-agent.",
+			Help: "Path to PEM-encoded private key file, leave blank or set key-use-agent to use ssh-agent." + env.ShellExpandHelp,
 		}, {
 			Name: "key_file_pass",
 			Help: `The passphrase to decrypt the PEM-encoded private key file.
@@ -164,6 +164,18 @@ Home directory can be found in a shared folder called "home"
 			Default:  false,
 			Help:     "Set to skip any symlinks and any other non regular files.",
 			Advanced: true,
+		}, {
+			Name:     "subsystem",
+			Default:  "sftp",
+			Help:     "Specifies the SSH2 subsystem on the remote host.",
+			Advanced: true,
+		}, {
+			Name:    "server_command",
+			Default: "",
+			Help: `Specifies the path or command to run a sftp server on the remote host.
+
+The subsystem option is ignored when server_command is defined.`,
+			Advanced: true,
 		}},
 	}
 	fs.Register(fsi)
@@ -187,12 +199,15 @@ type Options struct {
 	Md5sumCommand     string `config:"md5sum_command"`
 	Sha1sumCommand    string `config:"sha1sum_command"`
 	SkipLinks         bool   `config:"skip_links"`
+	Subsystem         string `config:"subsystem"`
+	ServerCommand     string `config:"server_command"`
 }
 
 // Fs stores the interface to the remote SFTP files
 type Fs struct {
 	name         string
 	root         string
+	absRoot      string
 	opt          Options          // parsed options
 	m            configmap.Mapper // config
 	features     *fs.Features     // optional features
@@ -289,13 +304,42 @@ func (f *Fs) sftpConnection() (c *conn, err error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "couldn't connect SSH")
 	}
-	c.sftpClient, err = sftp.NewClient(c.sshClient)
+	c.sftpClient, err = f.newSftpClient(c.sshClient)
 	if err != nil {
 		_ = c.sshClient.Close()
 		return nil, errors.Wrap(err, "couldn't initialise SFTP")
 	}
 	go c.wait()
 	return c, nil
+}
+
+// Creates a new SFTP client on conn, using the specified subsystem
+// or sftp server, and zero or more option functions
+func (f *Fs) newSftpClient(conn *ssh.Client, opts ...sftp.ClientOption) (*sftp.Client, error) {
+	s, err := conn.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	pw, err := s.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	pr, err := s.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	if f.opt.ServerCommand != "" {
+		if err := s.Start(f.opt.ServerCommand); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.RequestSubsystem(f.opt.Subsystem); err != nil {
+			return nil, err
+		}
+	}
+
+	return sftp.NewClientPipe(pr, pw, opts...)
 }
 
 // Get an SFTP connection from the pool, or open a new one
@@ -491,6 +535,7 @@ func NewFsWithConnection(ctx context.Context, name string, root string, m config
 	f := &Fs{
 		name:      name,
 		root:      root,
+		absRoot:   root,
 		opt:       *opt,
 		m:         m,
 		config:    sshConfig,
@@ -500,17 +545,27 @@ func NewFsWithConnection(ctx context.Context, name string, root string, m config
 	}
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
+		SlowHash:                true,
 	}).Fill(f)
 	// Make a connection and pool it to return errors early
 	c, err := f.getSftpConnection()
 	if err != nil {
 		return nil, errors.Wrap(err, "NewFs")
 	}
+	cwd, err := c.sftpClient.Getwd()
 	f.putSftpConnection(&c, nil)
+	if err != nil {
+		fs.Debugf(f, "Failed to read current directory - using relative paths: %v", err)
+	} else if !path.IsAbs(f.root) {
+		f.absRoot = path.Join(cwd, f.root)
+		fs.Debugf(f, "Using absolute root directory %q", f.absRoot)
+	}
 	if root != "" {
 		// Check to see if the root actually an existing file
+		oldAbsRoot := f.absRoot
 		remote := path.Base(root)
 		f.root = path.Dir(root)
+		f.absRoot = path.Dir(f.absRoot)
 		if f.root == "." {
 			f.root = ""
 		}
@@ -519,6 +574,7 @@ func NewFsWithConnection(ctx context.Context, name string, root string, m config
 			if err == fs.ErrorObjectNotFound || errors.Cause(err) == fs.ErrorNotAFile {
 				// File doesn't exist so return old f
 				f.root = root
+				f.absRoot = oldAbsRoot
 				return f, nil
 			}
 			return nil, err
@@ -601,7 +657,7 @@ func (f *Fs) dirExists(dir string) (bool, error) {
 // This should return ErrDirNotFound if the directory isn't
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	root := path.Join(f.root, dir)
+	root := path.Join(f.absRoot, dir)
 	ok, err := f.dirExists(root)
 	if err != nil {
 		return nil, errors.Wrap(err, "List failed")
@@ -682,7 +738,7 @@ func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, opt
 // directories above that
 func (f *Fs) mkParentDir(remote string) error {
 	parent := path.Dir(remote)
-	return f.mkdir(path.Join(f.root, parent))
+	return f.mkdir(path.Join(f.absRoot, parent))
 }
 
 // mkdir makes the directory and parents using native paths
@@ -718,7 +774,7 @@ func (f *Fs) mkdir(dirPath string) error {
 
 // Mkdir makes the root directory of the Fs object
 func (f *Fs) Mkdir(ctx context.Context, dir string) error {
-	root := path.Join(f.root, dir)
+	root := path.Join(f.absRoot, dir)
 	return f.mkdir(root)
 }
 
@@ -734,7 +790,7 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 		return fs.ErrorDirectoryNotEmpty
 	}
 	// Remove the directory
-	root := path.Join(f.root, dir)
+	root := path.Join(f.absRoot, dir)
 	c, err := f.getSftpConnection()
 	if err != nil {
 		return errors.Wrap(err, "Rmdir")
@@ -761,7 +817,7 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	}
 	err = c.sftpClient.Rename(
 		srcObj.path(),
-		path.Join(f.root, remote),
+		path.Join(f.absRoot, remote),
 	)
 	f.putSftpConnection(&c, err)
 	if err != nil {
@@ -788,8 +844,8 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		fs.Debugf(srcFs, "Can't move directory - not same remote type")
 		return fs.ErrorCantDirMove
 	}
-	srcPath := path.Join(srcFs.root, srcRemote)
-	dstPath := path.Join(f.root, dstRemote)
+	srcPath := path.Join(srcFs.absRoot, srcRemote)
+	dstPath := path.Join(f.absRoot, dstRemote)
 
 	// Check if destination exists
 	ok, err := f.dirExists(dstPath)
@@ -1075,7 +1131,7 @@ func (o *Object) ModTime(ctx context.Context) time.Time {
 
 // path returns the native path of the object
 func (o *Object) path() string {
-	return path.Join(o.fs.root, o.remote)
+	return path.Join(o.fs.absRoot, o.remote)
 }
 
 // setMetadata updates the info in the object from the stat result passed in
@@ -1091,7 +1147,7 @@ func (f *Fs) stat(remote string) (info os.FileInfo, err error) {
 	if err != nil {
 		return nil, errors.Wrap(err, "stat")
 	}
-	absPath := path.Join(f.root, remote)
+	absPath := path.Join(f.absRoot, remote)
 	info, err = c.sftpClient.Stat(absPath)
 	f.putSftpConnection(&c, err)
 	return info, err

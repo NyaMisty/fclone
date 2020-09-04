@@ -157,23 +157,31 @@ var (
 
 // VFS represents the top level filing system
 type VFS struct {
-	f         fs.Fs
-	root      *Dir
-	Opt       vfscommon.Options
-	cache     *vfscache.Cache
-	cancel    context.CancelFunc
-	usageMu   sync.Mutex
-	usageTime time.Time
-	usage     *fs.Usage
-	pollChan  chan time.Duration
+	f           fs.Fs
+	root        *Dir
+	Opt         vfscommon.Options
+	cache       *vfscache.Cache
+	cancelCache context.CancelFunc
+	usageMu     sync.Mutex
+	usageTime   time.Time
+	usage       *fs.Usage
+	pollChan    chan time.Duration
+	inUse       int32 // count of number of opens accessed with atomic
 }
+
+// Keep track of active VFS keyed on fs.ConfigString(f)
+var (
+	activeMu sync.Mutex
+	active   = map[string][]*VFS{}
+)
 
 // New creates a new VFS and root directory.  If opt is nil, then
 // DefaultOpt will be used
 func New(f fs.Fs, opt *vfscommon.Options) *VFS {
 	fsDir := fs.NewDir("", time.Now())
 	vfs := &VFS{
-		f: f,
+		f:     f,
+		inUse: int32(1),
 	}
 
 	// Make a copy of the options
@@ -190,11 +198,26 @@ func New(f fs.Fs, opt *vfscommon.Options) *VFS {
 	// Make sure directories are returned as directories
 	vfs.Opt.DirPerms |= os.ModeDir
 
+	// Find a VFS with the same name and options and return it if possible
+	activeMu.Lock()
+	defer activeMu.Unlock()
+	configName := fs.ConfigString(f)
+	for _, activeVFS := range active[configName] {
+		if vfs.Opt == activeVFS.Opt {
+			fs.Debugf(f, "Re-using VFS from active cache")
+			atomic.AddInt32(&activeVFS.inUse, 1)
+			return activeVFS
+		}
+	}
+	// Put the VFS into the active cache
+	active[configName] = append(active[configName], vfs)
+
 	// Create root directory
 	vfs.root = newDir(vfs, f, nil, fsDir)
 
 	// Start polling function
-	if do := vfs.f.Features().ChangeNotify; do != nil {
+	features := vfs.f.Features()
+	if do := features.ChangeNotify; do != nil {
 		vfs.pollChan = make(chan time.Duration)
 		do(context.TODO(), vfs.root.changeNotify, vfs.pollChan)
 		vfs.pollChan <- vfs.Opt.PollInterval
@@ -202,16 +225,33 @@ func New(f fs.Fs, opt *vfscommon.Options) *VFS {
 		fs.Infof(f, "poll-interval is not supported by this remote")
 	}
 
-	vfs.SetCacheMode(vfs.Opt.CacheMode)
+	// Warn if can't stream
+	if !vfs.Opt.ReadOnly && vfs.Opt.CacheMode < vfscommon.CacheModeWrites && features.PutStream == nil {
+		fs.Logf(f, "--vfs-cache-mode writes or full is recommended for this remote as it can't stream")
+	}
 
-	// add the remote control
-	vfs.addRC()
+	vfs.SetCacheMode(vfs.Opt.CacheMode)
 
 	// Pin the Fs into the cache so that when we use cache.NewFs
 	// with the same remote string we get this one. The Pin is
-	// removed by Shutdown
-	cache.Pin(f)
+	// removed when the vfs is finalized
+	cache.PinUntilFinalized(f, vfs)
+
 	return vfs
+}
+
+// Return the number of active cache entries and a VFS if any are in
+// the cache.
+func activeCacheEntries() (vfs *VFS, count int) {
+	activeMu.Lock()
+	for _, vfses := range active {
+		count += len(vfses)
+		if len(vfses) > 0 {
+			vfs = vfses[0]
+		}
+	}
+	activeMu.Unlock()
+	return vfs, count
 }
 
 // Fs returns the Fs passed into the New call
@@ -221,11 +261,11 @@ func (vfs *VFS) Fs() fs.Fs {
 
 // SetCacheMode change the cache mode
 func (vfs *VFS) SetCacheMode(cacheMode vfscommon.CacheMode) {
-	vfs.Shutdown()
+	vfs.shutdownCache()
 	vfs.cache = nil
 	if cacheMode > vfscommon.CacheModeOff {
 		ctx, cancel := context.WithCancel(context.Background())
-		cache, err := vfscache.New(ctx, vfs.f, &vfs.Opt) // FIXME pass on context or get from Opt?
+		cache, err := vfscache.New(ctx, vfs.f, &vfs.Opt, vfs.AddVirtual) // FIXME pass on context or get from Opt?
 		if err != nil {
 			fs.Errorf(nil, "Failed to create vfs cache - disabling: %v", err)
 			vfs.Opt.CacheMode = vfscommon.CacheModeOff
@@ -233,19 +273,40 @@ func (vfs *VFS) SetCacheMode(cacheMode vfscommon.CacheMode) {
 			return
 		}
 		vfs.Opt.CacheMode = cacheMode
-		vfs.cancel = cancel
+		vfs.cancelCache = cancel
 		vfs.cache = cache
 	}
 }
 
-// Shutdown stops any background go-routines
-func (vfs *VFS) Shutdown() {
-	// Unpin the Fs from the cache
-	cache.Unpin(vfs.f)
-	if vfs.cancel != nil {
-		vfs.cancel()
-		vfs.cancel = nil
+// shutdown the cache if it was running
+func (vfs *VFS) shutdownCache() {
+	if vfs.cancelCache != nil {
+		vfs.cancelCache()
+		vfs.cancelCache = nil
 	}
+}
+
+// Shutdown stops any background go-routines and removes the VFS from
+// the active ache.
+func (vfs *VFS) Shutdown() {
+	if atomic.AddInt32(&vfs.inUse, -1) > 0 {
+		return
+	}
+
+	// Remove from active cache
+	activeMu.Lock()
+	configName := fs.ConfigString(vfs.f)
+	activeVFSes := active[configName]
+	for i, activeVFS := range activeVFSes {
+		if activeVFS == vfs {
+			activeVFSes[i] = nil
+			active[configName] = append(activeVFSes[:i], activeVFSes[i+1:]...)
+			break
+		}
+	}
+	activeMu.Unlock()
+
+	vfs.shutdownCache()
 }
 
 // CleanUp deletes the contents of the on disk cache
@@ -265,7 +326,7 @@ func (vfs *VFS) FlushDirCache() {
 // time.Duration has elapsed
 func (vfs *VFS) WaitForWriters(timeout time.Duration) {
 	defer log.Trace(nil, "timeout=%v", timeout)("")
-	const tickTime = 1 * time.Second
+	tickTime := 10 * time.Millisecond
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	tick := time.NewTimer(tickTime)
@@ -273,17 +334,25 @@ func (vfs *VFS) WaitForWriters(timeout time.Duration) {
 	tick.Stop()
 	for {
 		writers := vfs.root.countActiveWriters()
-		if writers == 0 {
+		cacheInUse := 0
+		if vfs.cache != nil {
+			cacheInUse = vfs.cache.TotalInUse()
+		}
+		if writers == 0 && cacheInUse == 0 {
 			return
 		}
-		fs.Debugf(nil, "Still %d writers active, waiting %v", writers, tickTime)
+		fs.Debugf(nil, "Still %d writers active and %d cache items in use, waiting %v", writers, cacheInUse, tickTime)
 		tick.Reset(tickTime)
 		select {
 		case <-tick.C:
 			break
 		case <-deadline.C:
-			fs.Errorf(nil, "Exiting even though %d writers are active after %v", writers, timeout)
+			fs.Errorf(nil, "Exiting even though %d writers active and %d cache items in use after %v\n%s", writers, cacheInUse, timeout, vfs.cache.Dump())
 			return
+		}
+		tickTime *= 2
+		if tickTime > time.Second {
+			tickTime = time.Second
 		}
 	}
 }
@@ -585,4 +654,14 @@ func (vfs *VFS) ReadFile(filename string) (b []byte, err error) {
 	}
 	defer fs.CheckClose(f, &err)
 	return ioutil.ReadAll(f)
+}
+
+// AddVirtual adds the object (file or dir) to the directory cache
+func (vfs *VFS) AddVirtual(remote string, size int64, isDir bool) error {
+	dir, leaf, err := vfs.StatParent(remote)
+	if err != nil {
+		return err
+	}
+	dir.AddVirtual(leaf, size, false)
+	return nil
 }

@@ -189,8 +189,7 @@ func (fh *WriteFileHandle) close() (err error) {
 	fh.closed = true
 	// leave writer open until file is transferred
 	defer func() {
-		fh.file.delWriter(fh, false)
-		fh.file.finishWriterClose()
+		fh.file.delWriter(fh)
 	}()
 	// If file not opened and not safe to truncate then leave file intact
 	if !fh.opened && !fh.safeToTruncate() {
@@ -284,11 +283,9 @@ func (fh *WriteFileHandle) Stat() (os.FileInfo, error) {
 
 // Truncate file to given size
 func (fh *WriteFileHandle) Truncate(size int64) (err error) {
+	// defer log.Trace(fh.remote, "size=%d", size)("err=%v", &err)
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
-	if fh.closed {
-		return ECLOSED
-	}
 	if size != fh.offset {
 		fs.Errorf(fh.remote, "WriteFileHandle: Truncate: Can't change size without --vfs-cache-mode >= writes")
 		return EPERM

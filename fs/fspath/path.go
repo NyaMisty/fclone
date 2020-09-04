@@ -17,8 +17,9 @@ const (
 )
 
 var (
-	errInvalidCharacters = errors.New("config name contains invalid characters - may only contain 0-9, A-Z ,a-z ,_ , - and space ")
+	errInvalidCharacters = errors.New("config name contains invalid characters - may only contain 0-9, A-Z ,a-z ,_ , - and space")
 	errCantBeEmpty       = errors.New("can't use empty string as a path")
+	errCantStartWithDash = errors.New("config name starts with -")
 
 	// urlMatcher is a pattern to match an rclone URL
 	// note that this matches invalid remoteNames
@@ -35,6 +36,10 @@ var (
 func CheckConfigName(configName string) error {
 	if !configNameMatcher.MatchString(configName) {
 		return errInvalidCharacters
+	}
+	// Reject configName, if it starts with -, complicates usage. (#4261)
+	if strings.HasPrefix(configName, "-") {
+		return errCantStartWithDash
 	}
 	return nil
 }
@@ -100,14 +105,21 @@ func Split(remote string) (parent string, leaf string, err error) {
 // JoinRootPath joins any number of path elements into a single path, adding a
 // separating slash if necessary. The result is Cleaned; in particular,
 // all empty strings are ignored.
+//
 // If the first non empty element has a leading "//" this is preserved.
+//
+// If the path contains \ these will be converted to / on Windows.
 func JoinRootPath(elem ...string) string {
-	for i, e := range elem {
+	es := make([]string, len(elem))
+	for i := range es {
+		es[i] = filepath.ToSlash(elem[i])
+	}
+	for i, e := range es {
 		if e != "" {
 			if strings.HasPrefix(e, "//") {
-				return "/" + path.Clean(strings.Join(elem[i:], "/"))
+				return "/" + path.Clean(strings.Join(es[i:], "/"))
 			}
-			return path.Clean(strings.Join(elem[i:], "/"))
+			return path.Clean(strings.Join(es[i:], "/"))
 		}
 	}
 	return ""

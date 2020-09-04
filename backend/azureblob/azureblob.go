@@ -1,6 +1,6 @@
 // Package azureblob provides an interface to the Microsoft Azure blob object storage system
 
-// +build !plan9,!solaris
+// +build !plan9,!solaris,!js,go1.13
 
 package azureblob
 
@@ -967,8 +967,7 @@ func (f *Fs) Hashes() hash.Set {
 }
 
 // Purge deletes all the files and directories including the old versions.
-func (f *Fs) Purge(ctx context.Context) error {
-	dir := "" // forward compat!
+func (f *Fs) Purge(ctx context.Context, dir string) error {
 	container, directory := f.split(dir)
 	if container == "" || directory != "" {
 		// Delegate to caller if not root of a container

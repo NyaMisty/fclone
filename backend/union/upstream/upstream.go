@@ -97,6 +97,7 @@ func New(remote, root string, cacheTime time.Duration) (*Fs, error) {
 		return nil, err
 	}
 	f.Fs = myFs
+	cache.PinUntilFinalized(f.Fs, f)
 	return f, err
 }
 
@@ -335,6 +336,9 @@ func (f *Fs) updateUsageCore(lock bool) error {
 	usage, err := f.RootFs.Features().About(ctx)
 	if err != nil {
 		f.cacheUpdate = false
+		if errors.Cause(err) == fs.ErrorDirNotFound {
+			err = nil
+		}
 		return err
 	}
 	if lock {

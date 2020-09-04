@@ -1,7 +1,7 @@
 // Package qingstor provides an interface to QingStor object storage
 // Home: https://www.qingcloud.com/
 
-// +build !plan9
+// +build !plan9,!js
 
 package qingstor
 
@@ -356,6 +356,7 @@ func NewFs(name, root string, m configmap.Mapper) (fs.Fs, error) {
 		WriteMimeType:     true,
 		BucketBased:       true,
 		BucketBasedRootOK: true,
+		SlowModTime:       true,
 	}).Fill(f)
 
 	if f.rootBucket != "" && f.rootDirectory != "" {

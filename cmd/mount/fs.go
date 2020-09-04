@@ -15,23 +15,24 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/log"
 	"github.com/rclone/rclone/vfs"
-	"github.com/rclone/rclone/vfs/vfsflags"
 )
 
 // FS represents the top level filing system
 type FS struct {
 	*vfs.VFS
-	f fs.Fs
+	f   fs.Fs
+	opt *mountlib.Options
 }
 
 // Check interface satisfied
 var _ fusefs.FS = (*FS)(nil)
 
 // NewFS makes a new FS
-func NewFS(f fs.Fs) *FS {
+func NewFS(VFS *vfs.VFS, opt *mountlib.Options) *FS {
 	fsys := &FS{
-		VFS: vfs.New(f, &vfsflags.Opt),
-		f:   f,
+		VFS: VFS,
+		f:   VFS.Fs(),
+		opt: opt,
 	}
 	return fsys
 }
@@ -43,7 +44,7 @@ func (f *FS) Root() (node fusefs.Node, err error) {
 	if err != nil {
 		return nil, translateError(err)
 	}
-	return &Dir{root}, nil
+	return &Dir{root, f}, nil
 }
 
 // Check interface satisfied

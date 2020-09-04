@@ -51,6 +51,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &fs.Config.IgnoreExisting, "ignore-existing", "", fs.Config.IgnoreExisting, "Skip all files that exist on destination")
 	flags.BoolVarP(flagSet, &fs.Config.IgnoreErrors, "ignore-errors", "", fs.Config.IgnoreErrors, "delete even if there are I/O errors")
 	flags.BoolVarP(flagSet, &fs.Config.DryRun, "dry-run", "n", fs.Config.DryRun, "Do a trial run with no permanent changes")
+	flags.BoolVarP(flagSet, &fs.Config.Interactive, "interactive", "i", fs.Config.Interactive, "Enable interactive mode")
 	flags.DurationVarP(flagSet, &fs.Config.ConnectTimeout, "contimeout", "", fs.Config.ConnectTimeout, "Connect timeout")
 	flags.DurationVarP(flagSet, &fs.Config.Timeout, "timeout", "", fs.Config.Timeout, "IO idle timeout")
 	flags.DurationVarP(flagSet, &fs.Config.ExpectContinueTimeout, "expect-continue-timeout", "", fs.Config.ExpectContinueTimeout, "Timeout when using expect / 100-continue in HTTP")
@@ -64,7 +65,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &deleteAfter, "delete-after", "", false, "When synchronizing, delete files on destination after transferring (default)")
 	flags.Int64VarP(flagSet, &fs.Config.MaxDelete, "max-delete", "", -1, "When synchronizing, limit the number of deletes")
 	flags.BoolVarP(flagSet, &fs.Config.TrackRenames, "track-renames", "", fs.Config.TrackRenames, "When synchronizing, track file renames and do a server side move if possible")
-	flags.StringVarP(flagSet, &fs.Config.TrackRenamesStrategy, "track-renames-strategy", "", fs.Config.TrackRenamesStrategy, "Strategies to use when synchronizing using track-renames hash|modtime")
+	flags.StringVarP(flagSet, &fs.Config.TrackRenamesStrategy, "track-renames-strategy", "", fs.Config.TrackRenamesStrategy, "Strategies to use when synchronizing using track-renames hash|modtime|leaf")
 	flags.IntVarP(flagSet, &fs.Config.LowLevelRetries, "low-level-retries", "", fs.Config.LowLevelRetries, "Number of low level retries to do.")
 	flags.BoolVarP(flagSet, &fs.Config.UpdateOlder, "update", "u", fs.Config.UpdateOlder, "Skip files that are newer on the destination.")
 	flags.BoolVarP(flagSet, &fs.Config.UseServerModTime, "use-server-modtime", "", fs.Config.UseServerModTime, "Use server modified time instead of object metadata")
@@ -95,6 +96,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.FVarP(flagSet, &fs.Config.LogLevel, "log-level", "", "Log level DEBUG|INFO|NOTICE|ERROR")
 	flags.FVarP(flagSet, &fs.Config.StatsLogLevel, "stats-log-level", "", "Log level to show --stats output DEBUG|INFO|NOTICE|ERROR")
 	flags.FVarP(flagSet, &fs.Config.BwLimit, "bwlimit", "", "Bandwidth limit in kBytes/s, or use suffix b|k|M|G or a full timetable.")
+	flags.FVarP(flagSet, &fs.Config.BwLimitFile, "bwlimit-file", "", "Bandwidth limit per file in kBytes/s, or use suffix b|k|M|G or a full timetable.")
 	flags.FVarP(flagSet, &fs.Config.BufferSize, "buffer-size", "", "In memory buffer size when reading files for each --transfer.")
 	flags.FVarP(flagSet, &fs.Config.StreamingUploadCutoff, "streaming-upload-cutoff", "", "Cutoff for switching to chunked upload if file size is unknown. Upload starts after reaching cutoff or when file ends.")
 	flags.FVarP(flagSet, &fs.Config.Dump, "dump", "", "List of items to dump from: "+fs.DumpFlagsList)
@@ -120,6 +122,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.StringArrayVarP(flagSet, &uploadHeaders, "header-upload", "", nil, "Set HTTP header for upload transactions")
 	flags.StringArrayVarP(flagSet, &downloadHeaders, "header-download", "", nil, "Set HTTP header for download transactions")
 	flags.StringArrayVarP(flagSet, &headers, "header", "", nil, "Set HTTP header for all transactions")
+	flags.BoolVarP(flagSet, &fs.Config.RefreshTimes, "refresh-times", "", fs.Config.RefreshTimes, "Refresh the modtime of remote files.")
 }
 
 // ParseHeaders converts the strings passed in via the header flags into HTTPOptions

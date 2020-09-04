@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path"
 	"testing"
 	"time"
 
@@ -12,6 +15,7 @@ import (
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fstest"
+	"github.com/rclone/rclone/lib/rest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -192,7 +196,7 @@ func TestRcDeletefile(t *testing.T) {
 	fstest.CheckItems(t, r.Fremote, file2)
 }
 
-// operations/list: List the given remote and path in JSON format
+// operations/list: List the given remote and path in JSON format.
 func TestRcList(t *testing.T) {
 	r, call := rcNewRun(t, "operations/list")
 	defer r.Finalise()
@@ -402,6 +406,8 @@ func TestRcPublicLink(t *testing.T) {
 	in := rc.Params{
 		"fs":     r.FremoteName,
 		"remote": "",
+		"expire": "5m",
+		"unlink": false,
 	}
 	_, err := call.Fn(context.Background(), in)
 	require.Error(t, err)
@@ -432,6 +438,62 @@ func TestRcFsInfo(t *testing.T) {
 		features[k] = v
 	}
 	assert.Equal(t, features, got["Features"])
+
+}
+
+//operations/uploadfile : Tests if upload file succeeds
+//
+func TestUploadFile(t *testing.T) {
+	r, call := rcNewRun(t, "operations/uploadfile")
+	defer r.Finalise()
+
+	testFileName := "test.txt"
+	testFileContent := "Hello World"
+	r.WriteFile(testFileName, testFileContent, t1)
+	testItem1 := fstest.NewItem(testFileName, testFileContent, t1)
+	testItem2 := fstest.NewItem(path.Join("subdir", testFileName), testFileContent, t1)
+
+	currentFile, err := os.Open(path.Join(r.LocalName, testFileName))
+	require.NoError(t, err)
+
+	formReader, contentType, _, err := rest.MultipartUpload(currentFile, url.Values{}, "file", testFileName)
+	require.NoError(t, err)
+
+	httpReq := httptest.NewRequest("POST", "/", formReader)
+	httpReq.Header.Add("Content-Type", contentType)
+
+	in := rc.Params{
+		"_request": httpReq,
+		"fs":       r.FremoteName,
+		"remote":   "",
+	}
+
+	_, err = call.Fn(context.Background(), in)
+	require.NoError(t, err)
+
+	fstest.CheckListingWithPrecision(t, r.Fremote, []fstest.Item{testItem1}, nil, fs.ModTimeNotSupported)
+
+	assert.NoError(t, r.Fremote.Mkdir(context.Background(), "subdir"))
+
+	currentFile, err = os.Open(path.Join(r.LocalName, testFileName))
+	require.NoError(t, err)
+
+	formReader, contentType, _, err = rest.MultipartUpload(currentFile, url.Values{}, "file", testFileName)
+	require.NoError(t, err)
+
+	httpReq = httptest.NewRequest("POST", "/", formReader)
+	httpReq.Header.Add("Content-Type", contentType)
+
+	in = rc.Params{
+		"_request": httpReq,
+		"fs":       r.FremoteName,
+		"remote":   "subdir",
+	}
+
+	_, err = call.Fn(context.Background(), in)
+	require.NoError(t, err)
+
+	fstest.CheckListingWithPrecision(t, r.Fremote, []fstest.Item{testItem1, testItem2}, nil, fs.ModTimeNotSupported)
 
 }
 

@@ -7,27 +7,18 @@ package mount2
 import (
 	"fmt"
 	"log"
-	"os"
-	"os/signal"
 	"runtime"
-	"syscall"
 
 	fusefs "github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/okzk/sdnotify"
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
-	"github.com/rclone/rclone/lib/atexit"
 	"github.com/rclone/rclone/vfs"
 )
 
 func init() {
-	mountlib.NewMountCommand("mount2", true, Mount)
-
-	// Add mount to rc
+	mountlib.NewMountCommand("mount2", true, mount)
 	mountlib.AddRc("mount2", mount)
-
 }
 
 // mountOptions configures the options from the command line flags
@@ -36,12 +27,12 @@ func init() {
 func mountOptions(fsys *FS, f fs.Fs) (mountOpts *fuse.MountOptions) {
 	device := f.Name() + ":" + f.Root()
 	mountOpts = &fuse.MountOptions{
-		AllowOther:    mountlib.AllowOther,
+		AllowOther:    fsys.opt.AllowOther,
 		FsName:        device,
 		Name:          "rclone",
 		DisableXAttrs: true,
-		Debug:         mountlib.DebugFUSE,
-		MaxReadAhead:  int(mountlib.MaxReadAhead),
+		Debug:         fsys.opt.DebugFUSE,
+		MaxReadAhead:  int(fsys.opt.MaxReadAhead),
 
 		// RememberInodes: true,
 		// SingleThreaded: true,
@@ -105,22 +96,22 @@ func mountOptions(fsys *FS, f fs.Fs) (mountOpts *fuse.MountOptions) {
 	}
 	var opts []string
 	// FIXME doesn't work opts = append(opts, fmt.Sprintf("max_readahead=%d", maxReadAhead))
-	if mountlib.AllowNonEmpty {
+	if fsys.opt.AllowNonEmpty {
 		opts = append(opts, "nonempty")
 	}
-	if mountlib.AllowOther {
+	if fsys.opt.AllowOther {
 		opts = append(opts, "allow_other")
 	}
-	if mountlib.AllowRoot {
+	if fsys.opt.AllowRoot {
 		opts = append(opts, "allow_root")
 	}
-	if mountlib.DefaultPermissions {
+	if fsys.opt.DefaultPermissions {
 		opts = append(opts, "default_permissions")
 	}
 	if fsys.VFS.Opt.ReadOnly {
 		opts = append(opts, "ro")
 	}
-	if mountlib.WritebackCache {
+	if fsys.opt.WritebackCache {
 		log.Printf("FIXME --write-back-cache not supported")
 		// FIXME opts = append(opts,fuse.WritebackCache())
 	}
@@ -156,10 +147,11 @@ func mountOptions(fsys *FS, f fs.Fs) (mountOpts *fuse.MountOptions) {
 //
 // returns an error, and an error channel for the serve process to
 // report an error when fusermount is called.
-func mount(f fs.Fs, mountpoint string) (*vfs.VFS, <-chan error, func() error, error) {
+func mount(VFS *vfs.VFS, mountpoint string, opt *mountlib.Options) (<-chan error, func() error, error) {
+	f := VFS.Fs()
 	fs.Debugf(f, "Mounting on %q", mountpoint)
 
-	fsys := NewFS(f)
+	fsys := NewFS(VFS, opt)
 	// nodeFsOpts := &fusefs.PathNodeFsOptions{
 	// 	ClientInodes: false,
 	// 	Debug:        mountlib.DebugFUSE,
@@ -179,28 +171,28 @@ func mount(f fs.Fs, mountpoint string) (*vfs.VFS, <-chan error, func() error, er
 	// FIXME fill out
 	opts := fusefs.Options{
 		MountOptions: *mountOpts,
-		EntryTimeout: &mountlib.AttrTimeout,
-		AttrTimeout:  &mountlib.AttrTimeout,
+		EntryTimeout: &opt.AttrTimeout,
+		AttrTimeout:  &opt.AttrTimeout,
 		// UID
 		// GID
 	}
 
 	root, err := fsys.Root()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	rawFS := fusefs.NewNodeFS(root, &opts)
 	server, err := fuse.NewServer(rawFS, mountpoint, &opts.MountOptions)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	//mountOpts := &fuse.MountOptions{}
 	//server, err := fusefs.Mount(mountpoint, fsys, &opts)
 	// server, err := fusefs.Mount(mountpoint, root, &opts)
 	// if err != nil {
-	// 	return nil, nil, nil, err
+	// 	return nil, nil, err
 	// }
 
 	umount := func() error {
@@ -222,60 +214,9 @@ func mount(f fs.Fs, mountpoint string) (*vfs.VFS, <-chan error, func() error, er
 	fs.Debugf(f, "Waiting for the mount to start...")
 	err = server.WaitMount()
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 
 	fs.Debugf(f, "Mount started")
-	return fsys.VFS, errs, umount, nil
-}
-
-// Mount mounts the remote at mountpoint.
-//
-// If noModTime is set then it
-func Mount(f fs.Fs, mountpoint string) error {
-	// Mount it
-	vfs, errChan, unmount, err := mount(f, mountpoint)
-	if err != nil {
-		return errors.Wrap(err, "failed to mount FUSE fs")
-	}
-
-	sigInt := make(chan os.Signal, 1)
-	signal.Notify(sigInt, syscall.SIGINT, syscall.SIGTERM)
-	sigHup := make(chan os.Signal, 1)
-	signal.Notify(sigHup, syscall.SIGHUP)
-	atexit.Register(func() {
-		_ = unmount()
-	})
-
-	if err := sdnotify.Ready(); err != nil && err != sdnotify.ErrSdNotifyNoSocket {
-		return errors.Wrap(err, "failed to notify systemd")
-	}
-
-waitloop:
-	for {
-		select {
-		// umount triggered outside the app
-		case err = <-errChan:
-			break waitloop
-		// Program abort: umount
-		case <-sigInt:
-			err = unmount()
-			break waitloop
-		// user sent SIGHUP to clear the cache
-		case <-sigHup:
-			root, err := vfs.Root()
-			if err != nil {
-				fs.Errorf(f, "Error reading root: %v", err)
-			} else {
-				root.ForgetAll()
-			}
-		}
-	}
-
-	_ = sdnotify.Stopping()
-	if err != nil {
-		return errors.Wrap(err, "failed to umount FUSE fs")
-	}
-
-	return nil
+	return errs, umount, nil
 }

@@ -2,6 +2,7 @@
 package accounting
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/rclone/rclone/fs/rc"
+	"golang.org/x/time/rate"
 
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
@@ -34,6 +36,7 @@ type Account struct {
 	// shouldn't.
 	mu      sync.Mutex // mutex protects these values
 	in      io.Reader
+	ctx     context.Context // current context for transfer - may change
 	origIn  io.ReadCloser
 	close   io.Closer
 	size    int64
@@ -41,6 +44,8 @@ type Account struct {
 	closed  bool          // set if the file is closed
 	exit    chan struct{} // channel that will be closed when transfer is finished
 	withBuf bool          // is using a buffered in
+
+	tokenBucket *rate.Limiter // per file bandwidth limiter (may be nil)
 
 	values accountValues
 }
@@ -60,10 +65,11 @@ const averagePeriod = 16 // period to do exponentially weighted averages over
 
 // newAccountSizeName makes an Account reader for an io.ReadCloser of
 // the given size and name
-func newAccountSizeName(stats *StatsInfo, in io.ReadCloser, size int64, name string) *Account {
+func newAccountSizeName(ctx context.Context, stats *StatsInfo, in io.ReadCloser, size int64, name string) *Account {
 	acc := &Account{
 		stats:  stats,
 		in:     in,
+		ctx:    ctx,
 		close:  in,
 		origIn: in,
 		size:   size,
@@ -78,6 +84,12 @@ func newAccountSizeName(stats *StatsInfo, in io.ReadCloser, size int64, name str
 	if fs.Config.CutoffMode == fs.CutoffModeHard {
 		acc.values.max = int64((fs.Config.MaxTransfer))
 	}
+	currLimit := fs.Config.BwLimitFile.LimitAt(time.Now())
+	if currLimit.Bandwidth > 0 {
+		fs.Debugf(acc.name, "Limiting file transfer to %v", currLimit.Bandwidth)
+		acc.tokenBucket = newTokenBucket(currLimit.Bandwidth)
+	}
+
 	go acc.averageLoop()
 	stats.inProgress.set(acc.name, acc)
 	return acc
@@ -109,6 +121,14 @@ func (acc *Account) WithBuffer() *Account {
 	return acc
 }
 
+// HasBuffer - returns true if this Account has an AsyncReader with a buffer
+func (acc *Account) HasBuffer() bool {
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	_, ok := acc.in.(*asyncreader.AsyncReader)
+	return ok
+}
+
 // GetReader returns the underlying io.ReadCloser under any Buffer
 func (acc *Account) GetReader() io.ReadCloser {
 	acc.mu.Lock()
@@ -129,20 +149,28 @@ func (acc *Account) GetAsyncReader() *asyncreader.AsyncReader {
 // StopBuffering stops the async buffer doing any more buffering
 func (acc *Account) StopBuffering() {
 	if asyncIn, ok := acc.in.(*asyncreader.AsyncReader); ok {
+		asyncIn.StopBuffering()
+	}
+}
+
+// Abandon stops the async buffer doing any more buffering
+func (acc *Account) Abandon() {
+	if asyncIn, ok := acc.in.(*asyncreader.AsyncReader); ok {
 		asyncIn.Abandon()
 	}
 }
 
 // UpdateReader updates the underlying io.ReadCloser stopping the
 // async buffer (if any) and re-adding it
-func (acc *Account) UpdateReader(in io.ReadCloser) {
+func (acc *Account) UpdateReader(ctx context.Context, in io.ReadCloser) {
 	acc.mu.Lock()
 	withBuf := acc.withBuf
 	if withBuf {
-		acc.StopBuffering()
+		acc.Abandon()
 		acc.withBuf = false
 	}
 	acc.in = in
+	acc.ctx = ctx
 	acc.close = in
 	acc.origIn = in
 	acc.closed = false
@@ -188,6 +216,10 @@ func (acc *Account) averageLoop() {
 // Check the read before it has happened is valid returning the number
 // of bytes remaining to read.
 func (acc *Account) checkReadBefore() (bytesUntilLimit int64, err error) {
+	// Check to see if context is cancelled
+	if err = acc.ctx.Err(); err != nil {
+		return 0, err
+	}
 	acc.values.mu.Lock()
 	if acc.values.max >= 0 {
 		bytesUntilLimit = acc.values.max - acc.stats.GetBytes()
@@ -207,7 +239,7 @@ func (acc *Account) checkReadBefore() (bytesUntilLimit int64, err error) {
 }
 
 // Check the read call after the read has happened
-func checkReadAfter(bytesUntilLimit int64, n int, err error) (outN int, outErr error) {
+func (acc *Account) checkReadAfter(bytesUntilLimit int64, n int, err error) (outN int, outErr error) {
 	bytesUntilLimit -= int64(n)
 	if bytesUntilLimit < 0 {
 		// chop the overage off
@@ -242,6 +274,20 @@ func (acc *Account) ServerSideCopyEnd(n int64) {
 	acc.stats.Bytes(n)
 }
 
+// Account for n bytes from the current file bandwidth limit (if any)
+func (acc *Account) limitPerFileBandwidth(n int) {
+	acc.values.mu.Lock()
+	tokenBucket := acc.tokenBucket
+	acc.values.mu.Unlock()
+
+	if tokenBucket != nil {
+		err := tokenBucket.WaitN(context.Background(), n)
+		if err != nil {
+			fs.Errorf(nil, "Token bucket error: %v", err)
+		}
+	}
+}
+
 // Account the read and limit bandwidth
 func (acc *Account) accountRead(n int) {
 	// Update Stats
@@ -253,6 +299,7 @@ func (acc *Account) accountRead(n int) {
 	acc.stats.Bytes(int64(n))
 
 	limitBandwidth(n)
+	acc.limitPerFileBandwidth(n)
 }
 
 // read bytes from the io.Reader passed in and account them
@@ -261,7 +308,7 @@ func (acc *Account) read(in io.Reader, p []byte) (n int, err error) {
 	if err == nil {
 		n, err = in.Read(p)
 		acc.accountRead(n)
-		n, err = checkReadAfter(bytesUntilLimit, n, err)
+		n, err = acc.checkReadAfter(bytesUntilLimit, n, err)
 	}
 	return n, err
 }
@@ -290,7 +337,7 @@ func (awt *accountWriteTo) Write(p []byte) (n int, err error) {
 	bytesUntilLimit, err := awt.acc.checkReadBefore()
 	if err == nil {
 		n, err = awt.w.Write(p)
-		n, err = checkReadAfter(bytesUntilLimit, n, err)
+		n, err = awt.acc.checkReadAfter(bytesUntilLimit, n, err)
 		awt.acc.accountRead(n)
 	}
 	return n, err
@@ -318,7 +365,7 @@ func (acc *Account) AccountRead(n int) (err error) {
 	defer acc.mu.Unlock()
 	bytesUntilLimit, err := acc.checkReadBefore()
 	if err == nil {
-		n, err = checkReadAfter(bytesUntilLimit, n, err)
+		n, err = acc.checkReadAfter(bytesUntilLimit, n, err)
 		acc.accountRead(n)
 	}
 	return err
@@ -440,8 +487,8 @@ func (acc *Account) String() string {
 	)
 }
 
-// RemoteStats produces stats for this file
-func (acc *Account) RemoteStats() (out rc.Params) {
+// rcStats produces remote control stats for this file
+func (acc *Account) rcStats() (out rc.Params) {
 	out = make(rc.Params)
 	a, b := acc.progress()
 	out["bytes"] = a

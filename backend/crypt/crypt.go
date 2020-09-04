@@ -12,6 +12,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/config/obscure"
@@ -72,6 +73,20 @@ NB If filename_encryption is "off" then this option will do nothing.`,
 			Name:       "password2",
 			Help:       "Password or pass phrase for salt. Optional but recommended.\nShould be different to the previous password.",
 			IsPassword: true,
+		}, {
+			Name:    "server_side_across_configs",
+			Default: false,
+			Help: `Allow server side operations (eg copy) to work across different crypt configs.
+
+Normally this option is not what you want, but if you have two crypts
+pointing to the same backend you can use it.
+
+This can be used, for example, to change file name encryption type
+without re-uploading all the data. Just make two crypt backends
+pointing to two different directories with the single changed
+parameter and use rclone move to move the files between the crypt
+remotes.`,
+			Advanced: true,
 		}, {
 			Name: "show_mapping",
 			Help: `For all files listed show how the names encrypt.
@@ -144,24 +159,25 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 	if strings.HasPrefix(remote, name+":") {
 		return nil, errors.New("can't point crypt remote at itself - check the value of the remote setting")
 	}
-	wInfo, wName, wPath, wConfig, err := fs.ConfigFs(remote)
-	if err != nil {
-		return nil, errors.Wrapf(err, "failed to parse remote %q to wrap", remote)
-	}
 	// Make sure to remove trailing . reffering to the current dir
 	if path.Base(rpath) == "." {
 		rpath = strings.TrimSuffix(rpath, ".")
 	}
 	// Look for a file first
-	remotePath := fspath.JoinRootPath(wPath, cipher.EncryptFileName(rpath))
-	wrappedFs, err := wInfo.NewFs(wName, remotePath, wConfig)
-	// if that didn't produce a file, look for a directory
-	if err != fs.ErrorIsFile {
-		remotePath = fspath.JoinRootPath(wPath, cipher.EncryptDirName(rpath))
-		wrappedFs, err = wInfo.NewFs(wName, remotePath, wConfig)
+	var wrappedFs fs.Fs
+	if rpath == "" {
+		wrappedFs, err = cache.Get(remote)
+	} else {
+		remotePath := fspath.JoinRootPath(remote, cipher.EncryptFileName(rpath))
+		wrappedFs, err = cache.Get(remotePath)
+		// if that didn't produce a file, look for a directory
+		if err != fs.ErrorIsFile {
+			remotePath = fspath.JoinRootPath(remote, cipher.EncryptDirName(rpath))
+			wrappedFs, err = cache.Get(remotePath)
+		}
 	}
 	if err != fs.ErrorIsFile && err != nil {
-		return nil, errors.Wrapf(err, "failed to make remote %s:%q to wrap", wName, remotePath)
+		return nil, errors.Wrapf(err, "failed to make remote %q to wrap", remote)
 	}
 	f := &Fs{
 		Fs:     wrappedFs,
@@ -170,6 +186,7 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 		opt:    *opt,
 		cipher: cipher,
 	}
+	cache.PinUntilFinalized(f.Fs, f)
 	// the features here are ones we could support, and they are
 	// ANDed with the ones from wrappedFs
 	f.features = (&fs.Features{
@@ -181,6 +198,7 @@ func NewFs(name, rpath string, m configmap.Mapper) (fs.Fs, error) {
 		CanHaveEmptyDirectories: true,
 		SetTier:                 true,
 		GetTier:                 true,
+		ServerSideAcrossConfigs: opt.ServerSideAcrossConfigs,
 	}).Fill(f).Mask(wrappedFs).WrapsFs(f, wrappedFs)
 
 	return f, err
@@ -193,6 +211,7 @@ type Options struct {
 	DirectoryNameEncryption bool   `config:"directory_name_encryption"`
 	Password                string `config:"password"`
 	Password2               string `config:"password2"`
+	ServerSideAcrossConfigs bool   `config:"server_side_across_configs"`
 	ShowMapping             bool   `config:"show_mapping"`
 }
 
@@ -411,18 +430,18 @@ func (f *Fs) Rmdir(ctx context.Context, dir string) error {
 	return f.Fs.Rmdir(ctx, f.cipher.EncryptDirName(dir))
 }
 
-// Purge all files in the root and the root directory
+// Purge all files in the directory specified
 //
 // Implement this if you have a way of deleting all the files
 // quicker than just running Remove() on the result of List()
 //
 // Return an error if it doesn't exist
-func (f *Fs) Purge(ctx context.Context) error {
+func (f *Fs) Purge(ctx context.Context, dir string) error {
 	do := f.Fs.Features().Purge
 	if do == nil {
 		return fs.ErrorCantPurge
 	}
-	return do(ctx)
+	return do(ctx, f.cipher.EncryptDirName(dir))
 }
 
 // Copy src to this remote using server side copy operations.
@@ -656,7 +675,7 @@ func (f *Fs) DirCacheFlush() {
 }
 
 // PublicLink generates a public link to the remote path (usually readable by anyone)
-func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
+func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (string, error) {
 	do := f.Fs.Features().PublicLink
 	if do == nil {
 		return "", errors.New("PublicLink not supported")
@@ -664,9 +683,9 @@ func (f *Fs) PublicLink(ctx context.Context, remote string) (string, error) {
 	o, err := f.NewObject(ctx, remote)
 	if err != nil {
 		// assume it is a directory
-		return do(ctx, f.cipher.EncryptDirName(remote))
+		return do(ctx, f.cipher.EncryptDirName(remote), expire, unlink)
 	}
-	return do(ctx, o.(*Object).Object.Remote())
+	return do(ctx, o.(*Object).Object.Remote(), expire, unlink)
 }
 
 // ChangeNotify calls the passed function with a path

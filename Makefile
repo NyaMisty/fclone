@@ -1,33 +1,34 @@
 SHELL = bash
 # Branch we are working on
-BRANCH := $(or $(APPVEYOR_REPO_BRANCH),$(TRAVIS_BRANCH),$(BUILD_SOURCEBRANCHNAME),$(lastword $(subst /, ,$(GITHUB_REF))),$(shell git rev-parse --abbrev-ref HEAD))
+BRANCH := $(or $(BUILD_SOURCEBRANCHNAME),$(lastword $(subst /, ,$(GITHUB_REF))),$(shell git rev-parse --abbrev-ref HEAD))
 # Tag of the current commit, if any.  If this is not "" then we are building a release
 RELEASE_TAG := $(shell git tag -l --points-at HEAD)
 # Version of last release (may not be on this branch)
 VERSION := $(shell cat VERSION)
 # Last tag on this branch
 LAST_TAG := $(shell git describe --tags --abbrev=0)
+# Next version
+NEXT_VERSION := $(shell echo $(VERSION) | perl -lpe 's/v//; $$_ += 0.01; $$_ = sprintf("v%.2f.0", $$_)')
 # If we are working on a release, override branch to master
 ifdef RELEASE_TAG
 	BRANCH := master
+	LAST_TAG := $(shell git describe --abbrev=0 --tags $(VERSION)^)
 endif
-TAG_BRANCH := -$(BRANCH)
-BRANCH_PATH := branch/
+TAG_BRANCH := .$(BRANCH)
+BRANCH_PATH := branch/$(BRANCH)/
 # If building HEAD or master then unset TAG_BRANCH and BRANCH_PATH
 ifeq ($(subst HEAD,,$(subst master,,$(BRANCH))),)
 	TAG_BRANCH :=
 	BRANCH_PATH :=
 endif
-# Make version suffix -DDD-gCCCCCCCC (D=commits since last relase, C=Commit) or blank
-VERSION_SUFFIX := $(shell git describe --abbrev=8 --tags | perl -lpe 's/^v\d+\.\d+\.\d+//; s/^-(\d+)/"-".sprintf("%03d",$$1)/e;')
-# TAG is current version + number of commits since last release + branch
+# Make version suffix -beta.NNNN.CCCCCCCC (N=Commit number, C=Commit)
+VERSION_SUFFIX := -beta.$(shell git rev-list --count HEAD).$(shell git show --no-patch --no-notes --pretty='%h' HEAD)
+# TAG is current version + commit number + commit + branch
 TAG := $(VERSION)$(VERSION_SUFFIX)$(TAG_BRANCH)
-NEXT_VERSION := $(shell echo $(VERSION) | perl -lpe 's/v//; $$_ += 0.01; $$_ = sprintf("v%.2f.0", $$_)')
-ifndef RELEASE_TAG
-	TAG := $(TAG)-beta
+ifdef RELEASE_TAG
+	TAG := $(RELEASE_TAG)
 endif
 GO_VERSION := $(shell go version)
-GO_FILES := $(shell go list ./... | grep -v /vendor/ )
 ifdef BETA_SUBDIR
 	BETA_SUBDIR := /$(BETA_SUBDIR)
 endif
@@ -57,9 +58,12 @@ vars:
 	@echo BRANCH="'$(BRANCH)'"
 	@echo TAG="'$(TAG)'"
 	@echo VERSION="'$(VERSION)'"
-	@echo NEXT_VERSION="'$(NEXT_VERSION)'"
 	@echo GO_VERSION="'$(GO_VERSION)'"
 	@echo BETA_URL="'$(BETA_URL)'"
+
+btest:
+	@echo "[$(TAG)]($(BETA_URL)) on branch [$(BRANCH)](https://github.com/rclone/rclone/tree/$(BRANCH)) (uploaded in 15-30 mins)" | xclip -r -sel clip
+	@echo "Copied markdown of beta release to clip board"
 
 version:
 	@echo '$(TAG)'
@@ -71,10 +75,10 @@ test:	rclone test_all
 
 # Quick test
 quicktest:
-	RCLONE_CONFIG="/notfound" go test $(BUILDTAGS) $(GO_FILES)
+	RCLONE_CONFIG="/notfound" go test $(BUILDTAGS) ./...
 
 racequicktest:
-	RCLONE_CONFIG="/notfound" go test $(BUILDTAGS) -cpu=2 -race $(GO_FILES)
+	RCLONE_CONFIG="/notfound" go test $(BUILDTAGS) -cpu=2 -race ./...
 
 # Do source code quality checks
 check:	rclone
@@ -86,35 +90,43 @@ check:	rclone
 build_dep:
 	go run bin/get-github-release.go -extract golangci-lint golangci/golangci-lint 'golangci-lint-.*\.tar\.gz'
 
-# Get the release dependencies
-release_dep:
+# Get the release dependencies we only install on linux
+release_dep_linux:
 	go run bin/get-github-release.go -extract nfpm goreleaser/nfpm 'nfpm_.*_Linux_x86_64.tar.gz'
 	go run bin/get-github-release.go -extract github-release aktau/github-release 'linux-amd64-github-release.tar.bz2'
 
+# Get the release dependencies we only install on Windows
+release_dep_windows:
+	GO111MODULE=off GOOS="" GOARCH="" go get github.com/josephspurrier/goversioninfo/cmd/goversioninfo
+
 # Update dependencies
+showupdates:
+	@echo "*** Direct dependencies that could be updated ***"
+	@GO111MODULE=on go list -u -f '{{if (and (not (or .Main .Indirect)) .Update)}}{{.Path}}: {{.Version}} -> {{.Update.Version}}{{end}}' -m all 2> /dev/null
+
+# Update direct and indirect dependencies and test dependencies
 update:
-	GO111MODULE=on go get -u ./...
+	GO111MODULE=on go get -u -t ./...
+	-#GO111MODULE=on go get -d $(go list -m -f '{{if not (or .Main .Indirect)}}{{.Path}}{{end}}' all)
 	GO111MODULE=on go mod tidy
-	GO111MODULE=on go mod vendor
 
 # Tidy the module dependencies
 tidy:
 	GO111MODULE=on go mod tidy
-	GO111MODULE=on go mod vendor
 
 doc:	rclone.1 MANUAL.html MANUAL.txt rcdocs commanddocs
 
 rclone.1:	MANUAL.md
-	pandoc -s --from markdown --to man MANUAL.md -o rclone.1
+	pandoc -s --from markdown-smart --to man MANUAL.md -o rclone.1
 
 MANUAL.md:	bin/make_manual.py docs/content/*.md commanddocs backenddocs
 	./bin/make_manual.py
 
 MANUAL.html:	MANUAL.md
-	pandoc -s --from markdown --to html MANUAL.md -o MANUAL.html
+	pandoc -s --from markdown-smart --to html MANUAL.md -o MANUAL.html
 
 MANUAL.txt:	MANUAL.md
-	pandoc -s --from markdown --to plain MANUAL.md -o MANUAL.txt
+	pandoc -s --from markdown-smart --to plain MANUAL.md -o MANUAL.txt
 
 commanddocs: rclone
 	XDG_CACHE_HOME="" XDG_CONFIG_HOME="" HOME="\$$HOME" USER="\$$USER" rclone gendocs docs/content/
@@ -152,6 +164,11 @@ validate_website: website
 tarball:
 	git archive -9 --format=tar.gz --prefix=rclone-$(TAG)/ -o build/rclone-$(TAG).tar.gz $(TAG)
 
+vendorball:
+	go mod vendor
+	tar -zcf build/rclone-$(TAG)-vendor.tar.gz vendor
+	rm -rf vendor
+
 sign_upload:
 	cd build && md5sum rclone-v* | gpg --clearsign > MD5SUMS
 	cd build && sha1sum rclone-v* | gpg --clearsign > SHA1SUMS
@@ -183,14 +200,7 @@ log_since_last_release:
 compile_all:
 	go run bin/cross-compile.go -compile-only $(BUILDTAGS) $(TAG)
 
-appveyor_upload:
-	rclone --config bin/travis.rclone.conf -v copy --exclude '*beta-latest*' build/ $(BETA_UPLOAD)
-ifndef BRANCH_PATH
-	rclone --config bin/travis.rclone.conf -v copy --include '*beta-latest*' --include version.txt build/ $(BETA_UPLOAD_ROOT)
-endif
-	@echo Beta release ready at $(BETA_URL)
-
-circleci_upload:
+ci_upload:
 	sudo chown -R $$USER build
 	find build -type l -delete
 	gzip -r9v build
@@ -200,10 +210,7 @@ ifndef BRANCH_PATH
 endif
 	@echo Beta release ready at $(BETA_URL)/testbuilds
 
-travis_beta:
-ifeq (linux,$(filter linux,$(subst Linux,linux,$(TRAVIS_OS_NAME) $(AGENT_OS))))
-	go run bin/get-github-release.go -extract nfpm goreleaser/nfpm 'nfpm_.*\.tar.gz'
-endif
+ci_beta:
 	git log $(LAST_TAG).. > /tmp/git-log.txt
 	go run bin/cross-compile.go -release beta-latest -git-log /tmp/git-log.txt $(BUILD_FLAGS) $(BUILDTAGS) $(TAG)
 	rclone --config bin/travis.rclone.conf -v copy --exclude '*beta-latest*' build/ $(BETA_UPLOAD)
@@ -212,33 +219,32 @@ ifndef BRANCH_PATH
 endif
 	@echo Beta release ready at $(BETA_URL)
 
-# Fetch the binary builds from travis and appveyor
+# Fetch the binary builds from GitHub actions
 fetch_binaries:
 	rclone -P sync --exclude "/testbuilds/**" --delete-excluded $(BETA_UPLOAD) build/
 
 serve:	website
 	cd docs && hugo server -v -w --disableFastRender
 
-tag:	doc
-	@echo "Old tag is $(VERSION)"
-	@echo "New tag is $(NEXT_VERSION)"
-	echo -e "package fs\n\n// Version of rclone\nvar Version = \"$(NEXT_VERSION)\"\n" | gofmt > fs/version.go
-	echo -n "$(NEXT_VERSION)" > docs/layouts/partials/version.html
-	echo "$(NEXT_VERSION)" > VERSION
-	git tag -s -m "Version $(NEXT_VERSION)" $(NEXT_VERSION)
-	bin/make_changelog.py $(LAST_TAG) $(NEXT_VERSION) > docs/content/changelog.md.new
+tag:	retag doc
+	bin/make_changelog.py $(LAST_TAG) $(VERSION) > docs/content/changelog.md.new
 	mv docs/content/changelog.md.new docs/content/changelog.md
 	@echo "Edit the new changelog in docs/content/changelog.md"
 	@echo "Then commit all the changes"
-	@echo git commit -m \"Version $(NEXT_VERSION)\" -a -v
+	@echo git commit -m \"Version $(VERSION)\" -a -v
 	@echo "And finally run make retag before make cross etc"
 
 retag:
+	@echo "Version is $(VERSION)"
 	git tag -f -s -m "Version $(VERSION)" $(VERSION)
 
 startdev:
-	echo -e "package fs\n\n// Version of rclone\nvar Version = \"$(VERSION)-DEV\"\n" | gofmt > fs/version.go
-	git commit -m "Start $(VERSION)-DEV development" fs/version.go
+	@echo "Version is $(VERSION)"
+	@echo "Next version is $(NEXT_VERSION)"
+	echo -e "package fs\n\n// Version of rclone\nvar Version = \"$(NEXT_VERSION)-DEV\"\n" | gofmt > fs/version.go
+	echo -n "$(NEXT_VERSION)" > docs/layouts/partials/version.html
+	echo "$(NEXT_VERSION)" > VERSION
+	git commit -m "Start $(NEXT_VERSION)-DEV development" fs/version.go VERSION docs/layouts/partials/version.html
 
 winzip:
 	zip -9 rclone-$(TAG).zip rclone.exe

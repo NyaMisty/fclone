@@ -22,6 +22,14 @@ Many equally important things (like access tokens) are not obscured in
 the config file. However it is very hard to shoulder surf a 64
 character hex token.
 
+This command can also accept a password through STDIN instead of an
+argument by passing a hyphen as an argument. Example:
+
+echo "secretpassword" | rclone obscure -
+
+If there is no data on STDIN to read, rclone obscure will default to
+obfuscating the hyphen itself.
+
 If you want to encrypt the config file then please use config file
 encryption - see [rclone config](/commands/rclone_config/) for more
 info.

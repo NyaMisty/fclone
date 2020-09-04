@@ -20,43 +20,46 @@ import (
 	"time"
 
 	_ "github.com/rclone/rclone/backend/all" // import all the backends
+	"github.com/rclone/rclone/cmd/mountlib"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/vfs"
 	"github.com/rclone/rclone/vfs/vfscommon"
+	"github.com/rclone/rclone/vfs/vfsflags"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type (
-	// UnmountFn is called to unmount the file system
-	UnmountFn func() error
-	// MountFn is called to mount the file system
-	MountFn func(f fs.Fs, mountpoint string) (vfs *vfs.VFS, unmountResult <-chan error, unmount func() error, err error)
-)
-
 var (
-	mountFn MountFn
+	mountFn mountlib.MountFn
 )
 
 // RunTests runs all the tests against all the VFS cache modes
 //
 // If useVFS is set then it runs the tests against a VFS rather than amount
-func RunTests(t *testing.T, useVFS bool, fn MountFn) {
+func RunTests(t *testing.T, useVFS bool, fn mountlib.MountFn) {
 	mountFn = fn
 	flag.Parse()
-	cacheModes := []vfscommon.CacheMode{
-		vfscommon.CacheModeOff,
-		vfscommon.CacheModeMinimal,
-		vfscommon.CacheModeWrites,
-		vfscommon.CacheModeFull,
+	tests := []struct {
+		cacheMode vfscommon.CacheMode
+		writeBack time.Duration
+	}{
+		{cacheMode: vfscommon.CacheModeOff},
+		{cacheMode: vfscommon.CacheModeMinimal},
+		{cacheMode: vfscommon.CacheModeWrites},
+		{cacheMode: vfscommon.CacheModeFull},
+		{cacheMode: vfscommon.CacheModeFull, writeBack: 100 * time.Millisecond},
 	}
 	run = newRun(useVFS)
-	for _, cacheMode := range cacheModes {
-		run.cacheMode(cacheMode)
-		log.Printf("Starting test run with cache mode %v", cacheMode)
-		ok := t.Run(fmt.Sprintf("CacheMode=%v", cacheMode), func(t *testing.T) {
+	for _, test := range tests {
+		run.cacheMode(test.cacheMode, test.writeBack)
+		what := fmt.Sprintf("CacheMode=%v", test.cacheMode)
+		if test.writeBack > 0 {
+			what += fmt.Sprintf(",WriteBack=%v", test.writeBack)
+		}
+		log.Printf("Starting test run with %s", what)
+		ok := t.Run(what, func(t *testing.T) {
 			t.Run("TestTouchAndDelete", TestTouchAndDelete)
 			t.Run("TestRenameOpenHandle", TestRenameOpenHandle)
 			t.Run("TestDirLs", TestDirLs)
@@ -84,7 +87,7 @@ func RunTests(t *testing.T, useVFS bool, fn MountFn) {
 			t.Run("TestWriteFileDup", TestWriteFileDup)
 			t.Run("TestWriteFileAppend", TestWriteFileAppend)
 		})
-		log.Printf("Finished test run with cache mode %v (ok=%v)", cacheMode, ok)
+		log.Printf("Finished test run with %s (ok=%v)", what, ok)
 		if !ok {
 			break
 		}
@@ -102,7 +105,7 @@ type Run struct {
 	fremoteName  string
 	cleanRemote  func()
 	umountResult <-chan error
-	umountFn     UnmountFn
+	umountFn     mountlib.UnmountFn
 	skip         bool
 }
 
@@ -168,7 +171,8 @@ found:
 func (r *Run) mount() {
 	log.Printf("mount %q %q", r.fremote, r.mountPath)
 	var err error
-	r.vfs, r.umountResult, r.umountFn, err = mountFn(r.fremote, r.mountPath)
+	r.vfs = vfs.New(r.fremote, &vfsflags.Opt)
+	r.umountResult, r.umountFn, err = mountFn(r.vfs, r.mountPath, &mountlib.Opt)
 	if err != nil {
 		log.Printf("mount FAILED: %v", err)
 		r.skip = true
@@ -218,8 +222,8 @@ func (r *Run) umount() {
 	}
 }
 
-// cacheMode flushes the VFS and changes the CacheMode
-func (r *Run) cacheMode(cacheMode vfscommon.CacheMode) {
+// cacheMode flushes the VFS and changes the CacheMode and the writeBack time
+func (r *Run) cacheMode(cacheMode vfscommon.CacheMode, writeBack time.Duration) {
 	if r.skip {
 		log.Printf("FUSE not found so skipping cacheMode")
 		return
@@ -239,6 +243,7 @@ func (r *Run) cacheMode(cacheMode vfscommon.CacheMode) {
 	}
 	// Reset the cache mode
 	r.vfs.SetCacheMode(cacheMode)
+	r.vfs.Opt.WriteBack = writeBack
 	// Flush the directory cache
 	r.vfs.FlushDirCache()
 
@@ -410,7 +415,6 @@ func (r *Run) readFile(t *testing.T, filepath string) string {
 	filepath = r.path(filepath)
 	result, err := run.os.ReadFile(filepath)
 	require.NoError(t, err)
-	time.Sleep(100 * time.Millisecond) // FIXME wait for Release
 	return string(result)
 }
 

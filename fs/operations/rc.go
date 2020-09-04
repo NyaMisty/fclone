@@ -2,7 +2,13 @@ package operations
 
 import (
 	"context"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
+	"path"
 	"strings"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
@@ -138,10 +144,11 @@ func rcMoveOrCopyFile(ctx context.Context, in rc.Params, cp bool) (out rc.Params
 
 func init() {
 	for _, op := range []struct {
-		name     string
-		title    string
-		help     string
-		noRemote bool
+		name         string
+		title        string
+		help         string
+		noRemote     bool
+		needsRequest bool
 	}{
 		{name: "mkdir", title: "Make a destination directory or container"},
 		{name: "rmdir", title: "Remove an empty directory or container"},
@@ -150,6 +157,7 @@ func init() {
 		{name: "delete", title: "Remove files in the path", noRemote: true},
 		{name: "deletefile", title: "Remove the single file pointed to"},
 		{name: "copyurl", title: "Copy the URL to the object", help: "- url - string, URL to read from\n - autoFilename - boolean, set to true to retrieve destination file name from url"},
+		{name: "uploadfile", title: "Upload file using multiform/form-data", help: "- each part in body represents a file to be uploaded", needsRequest: true},
 		{name: "cleanup", title: "Remove trashed files in the remote or path", noRemote: true},
 	} {
 		op := op
@@ -160,6 +168,7 @@ func init() {
 		rc.Add(rc.Call{
 			Path:         "operations/" + op.name,
 			AuthRequired: true,
+			NeedsRequest: op.needsRequest,
 			Fn: func(ctx context.Context, in rc.Params) (rc.Params, error) {
 				return rcSingleCommand(ctx, in, op.name, op.noRemote)
 			},
@@ -219,6 +228,41 @@ func rcSingleCommand(ctx context.Context, in rc.Params, name string, noRemote bo
 
 		_, err = CopyURL(ctx, f, remote, url, autoFilename, noClobber)
 		return nil, err
+	case "uploadfile":
+
+		var request *http.Request
+		request, err := in.GetHTTPRequest()
+
+		if err != nil {
+			return nil, err
+		}
+
+		contentType := request.Header.Get("Content-Type")
+		mediaType, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return nil, err
+		}
+
+		if strings.HasPrefix(mediaType, "multipart/") {
+			mr := multipart.NewReader(request.Body, params["boundary"])
+			for {
+				p, err := mr.NextPart()
+				if err == io.EOF {
+					return nil, nil
+				}
+				if err != nil {
+					return nil, err
+				}
+				if p.FileName() != "" {
+					obj, err := Rcat(ctx, f, path.Join(remote, p.FileName()), p, time.Now())
+					if err != nil {
+						return nil, err
+					}
+					fs.Debugf(obj, "Upload Succeeded")
+				}
+			}
+		}
+		return nil, nil
 	case "cleanup":
 		return nil, CleanUp(ctx, f)
 	}
@@ -271,6 +315,8 @@ func init() {
 
 - fs - a remote name string eg "drive:"
 - remote - a path within that remote eg "dir"
+- unlink - boolean - if set removes the link rather than adding it (optional)
+- expire - string - the expiry time of the link eg "1d" (optional)
 
 Returns
 
@@ -287,7 +333,12 @@ func rcPublicLink(ctx context.Context, in rc.Params) (out rc.Params, err error) 
 	if err != nil {
 		return nil, err
 	}
-	url, err := PublicLink(ctx, f, remote)
+	unlink, _ := in.GetBool("unlink")
+	expire, err := in.GetDuration("expire")
+	if err != nil && !rc.IsErrParamNotFound(err) {
+		return nil, err
+	}
+	url, err := PublicLink(ctx, f, remote, fs.Duration(expire), unlink)
 	if err != nil {
 		return nil, err
 	}

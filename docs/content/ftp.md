@@ -10,6 +10,10 @@ FTP is the File Transfer Protocol. FTP support is provided using the
 [github.com/jlaffaye/ftp](https://godoc.org/github.com/jlaffaye/ftp)
 package.
 
+Paths are specified as `remote:path`. If the path does not begin with
+a `/` it is relative to the home directory of the user.  An empty path
+`remote:` refers to the user's home directory.
+
 Here is an example of making an FTP configuration.  First run
 
     rclone config
@@ -61,6 +65,9 @@ password:
 Use FTP over TLS (Implicit)
 Enter a boolean value (true or false). Press Enter for the default ("false").
 tls> 
+Use FTP over TLS (Explicit)
+Enter a boolean value (true or false). Press Enter for the default ("false").
+explicit_tls> 
 Remote config
 --------------------
 [remote]
@@ -91,7 +98,7 @@ List the contents of a directory
 Sync `/home/local/directory` to the remote directory, deleting any
 excess files in the directory.
 
-    rclone sync /home/local/directory remote:directory
+    rclone sync -i /home/local/directory remote:directory
 
 ### Modified time ###
 
@@ -181,10 +188,26 @@ FTP password
 
 #### --ftp-tls
 
-Use FTP over TLS (Implicit)
+Use FTPS over TLS (Implicit)
+When using implicit FTP over TLS the client will connect using TLS
+right from the start, which in turn breaks the compatibility with
+non-TLS-aware servers. This is usually served over port 990 rather
+than port 21. Cannot be used in combination with explicit FTP.
 
 - Config:      tls
 - Env Var:     RCLONE_FTP_TLS
+- Type:        bool
+- Default:     false
+
+#### --ftp-explicit-tls
+
+Use FTP over TLS (Explicit)
+When using explicit FTP over TLS the client explicitly request
+security from the server in order to upgrade a plain text connection
+to an encrypted one. Cannot be used in combination with implicit FTP.
+
+- Config:      explicit_tls
+- Env Var:     RCLONE_FTP_EXPLICIT_TLS
 - Type:        bool
 - Default:     false
 
@@ -234,8 +257,9 @@ See: the [encoding section in the overview](/overview/#encoding) for more info.
 
 ### Limitations ###
 
-Note that since FTP isn't HTTP based the following flags don't work
-with it: `--dump-headers`, `--dump-bodies`, `--dump-auth`
+Note that FTP does have its own implementation of : `--dump headers`,
+`--dump bodies`, `--dump auth` for debugging which isn't the same as
+the HTTP based backends - it has less fine grained control.
 
 Note that `--timeout` isn't supported (but `--contimeout` is).
 
@@ -245,6 +269,3 @@ FTP could support server side move but doesn't yet.
 
 Note that the ftp backend does not support the `ftp_proxy` environment
 variable yet.
-
-Note that while implicit FTP over TLS is supported,
-explicit FTP over TLS is not.

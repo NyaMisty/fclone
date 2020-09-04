@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-
 	"github.com/rclone/rclone/backend/drive"
+	_ "github.com/rclone/rclone/backend/drive"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/filter"
@@ -72,16 +72,15 @@ type syncCopyMove struct {
 	backupDir              fs.Fs                  // place to store overwrites/deletes
 	checkFirst             bool                   // if set run all the checkers before starting transfers
 
-	// Mod
 	srcOnlyDirsMu sync.Mutex             // protect srcOnlyDirs
 	srcOnlyDirs   map[string]fs.DirEntry // src only dirs
 }
-
 type trackRenamesStrategy byte
 
 const (
 	trackRenamesStrategyHash trackRenamesStrategy = 1 << iota
 	trackRenamesStrategyModtime
+	trackRenamesStrategyLeaf
 )
 
 func (strategy trackRenamesStrategy) hash() bool {
@@ -90,6 +89,10 @@ func (strategy trackRenamesStrategy) hash() bool {
 
 func (strategy trackRenamesStrategy) modTime() bool {
 	return (strategy & trackRenamesStrategyModtime) != 0
+}
+
+func (strategy trackRenamesStrategy) leaf() bool {
+	return (strategy & trackRenamesStrategyLeaf) != 0
 }
 
 func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.DeleteMode, DoMove bool, deleteEmptySrcDirs bool, copyEmptySrcDirs bool) (*syncCopyMove, error) {
@@ -402,6 +405,7 @@ func (s *syncCopyMove) startTransfers() {
 		fraction := (100 * i) / fs.Config.Transfers
 		go s.pairCopyOrMove(s.ctx, s.toBeUploaded, s.fdst, fraction, &s.transfersWg)
 	}
+
 }
 
 // This stops the background transfers
@@ -658,6 +662,8 @@ func parseTrackRenamesStrategy(strategies string) (strategy trackRenamesStrategy
 			strategy |= trackRenamesStrategyHash
 		case "modtime":
 			strategy |= trackRenamesStrategyModtime
+		case "leaf":
+			strategy |= trackRenamesStrategyLeaf
 		case "size":
 			// ignore
 		default:
@@ -687,11 +693,17 @@ func (s *syncCopyMove) renameID(obj fs.Object, renamesStrategy trackRenamesStrat
 			return ""
 		}
 
-		fmt.Fprintf(&builder, ",%s", hash)
+		builder.WriteRune(',')
+		builder.WriteString(hash)
 	}
 
 	// for renamesStrategy.modTime() we don't add to the hash but we check the times in
 	// popRenameMap
+
+	if renamesStrategy.leaf() {
+		builder.WriteRune(',')
+		builder.WriteString(path.Base(obj.Remote()))
+	}
 
 	return builder.String()
 }
@@ -707,6 +719,7 @@ func (s *syncCopyMove) pushRenameMap(hash string, obj fs.Object) {
 // renameMap or returns nil if not found.
 func (s *syncCopyMove) popRenameMap(hash string, src fs.Object) (dst fs.Object) {
 	s.renameMapMu.Lock()
+	defer s.renameMapMu.Unlock()
 	dsts, ok := s.renameMap[hash]
 	if ok && len(dsts) > 0 {
 		// Element to remove
@@ -739,7 +752,6 @@ func (s *syncCopyMove) popRenameMap(hash string, src fs.Object) (dst fs.Object) 
 			delete(s.renameMap, hash)
 		}
 	}
-	s.renameMapMu.Unlock()
 	return dst
 }
 
@@ -1011,7 +1023,6 @@ func (s *syncCopyMove) SrcOnly(src fs.DirEntry) (recurse bool) {
 		s.srcEmptyDirs[src.Remote()] = src
 		s.srcEmptyDirsMu.Unlock()
 
-		// Mod
 		s.srcOnlyDirsMu.Lock()
 		s.srcOnlyDirs[src.Remote()] = src
 		s.srcOnlyDirsMu.Unlock()
@@ -1129,8 +1140,7 @@ func MoveDir(ctx context.Context, fdst, fsrc fs.Fs, deleteEmptySrcDirs bool, cop
 
 	// First attempt to use DirMover if exists, same Fs and no filters are active
 	if fdstDirMove := fdst.Features().DirMove; fdstDirMove != nil && operations.SameConfig(fsrc, fdst) && filter.Active.InActive() {
-		if fs.Config.DryRun {
-			fs.Logf(fdst, "Not doing server side directory move as --dry-run")
+		if operations.SkipDestructive(ctx, fdst, "server side directory move") {
 			return nil
 		}
 		fs.Debugf(fdst, "Using server side directory move")
