@@ -74,6 +74,7 @@ var archFlags = map[string][]string{
 	"386":    {"GO386=387"},
 	"mips":   {"GOMIPS=softfloat"},
 	"mipsle": {"GOMIPS=softfloat"},
+	"arm":    {"GOARM=6"},
 	"arm-v7": {"GOARM=7"},
 }
 
@@ -280,7 +281,7 @@ func stripVersion(goarch string) string {
 
 // build the binary in dir returning success or failure
 func compileArch(version, goos, goarch, dir string) bool {
-	log.Printf("Compiling %s/%s", goos, goarch)
+	log.Printf("Compiling %s/%s into %s", goos, goarch, dir)
 	output := filepath.Join(dir, "fclone")
 	if goos == "windows" {
 		output += ".exe"
@@ -298,7 +299,6 @@ func compileArch(version, goos, goarch, dir string) bool {
 		"go", "build",
 		"--ldflags", "-s -X github.com/mawaya/rclone/fs.Version=" + version,
 		"-trimpath",
-		"-i",
 		"-o", output,
 		"-tags", *tags,
 		"..",
