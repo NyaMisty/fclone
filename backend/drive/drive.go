@@ -1371,6 +1371,7 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 	// isFileID := false
 	var srcFile *drive.File
 	if rootID, _ := parseRootID(path); len(rootID) > 6 {
+		f.opt.RootFolderID = rootID
 
 		err = f.pacer.Call(func() (bool, error) {
 			srcFile, err = f.svc.Files.Get(rootID).
@@ -1382,7 +1383,6 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 		if err == nil {
 			if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder" {
 				fs.Debugf(nil, "Root ID (File): %s", rootID)
-				f.opt.RootFolderID = rootID
 			} else {
 				if srcFile.DriveId == rootID {
 					fs.Debugf(nil, "Root ID (Drive): %s", rootID)
@@ -1395,6 +1395,8 @@ func NewFs(name, path string, m configmap.Mapper) (fs.Fs, error) {
 				srcFile = nil
 			}
 			f.isTeamDrive = f.opt.TeamDriveID != ""
+		} else {
+			return nil, err
 		}
 	}
 
