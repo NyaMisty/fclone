@@ -29,5 +29,3 @@ Please visit the following channels for helps or optimal configs or sample usage
 This is free software under the terms of MIT the license (check the
 [COPYING file](/COPYING) included in this package).
 
-## Others
-  * Looking for invite to ⚫peral (please contact me via <mawaya.mwy@gmail.com> if you can help 😉)
