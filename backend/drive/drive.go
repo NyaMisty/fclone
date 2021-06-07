@@ -694,6 +694,7 @@ type Object struct {
 }
 
 // ------------------------------------------------------------
+var serviceAccountBlacklist sync.Map
 
 // ServiceAccountPool ...
 type ServiceAccountPool struct {
@@ -803,11 +804,27 @@ func (p *ServiceAccountPool) _getFile(remove bool) (file string, err error) {
 	for k := range files {
 		keys = append(keys, k)
 	}
-	r := rand.Intn(len(keys))
-	file = keys[r]
 
 	if remove {
+		serviceAccountBlacklist.Store(file, time.Now())
 		delete(files, file)
+	}
+
+	rl := rand.Perm(len(keys))
+	found := false
+	for _, r := range rl {
+		//r := rand.Intn(len(keys))
+		file = keys[r]
+		blackTime, ok := serviceAccountBlacklist.Load(file)
+		if !ok || time.Now().Sub(blackTime.(time.Time)) > time.Hour * 25 {
+			serviceAccountBlacklist.Delete(file)
+			found = true
+			break
+		}
+	}
+	if !found {
+		err = errors.Errorf("no available service account file")
+		return
 	}
 	return
 }
