@@ -14,9 +14,13 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"mime"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +29,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
@@ -73,6 +78,12 @@ const (
 	listRGrouping    = 50   // number of IDs to search at once when using ListR
 	listRInputBuffer = 1000 // size of input buffer when using ListR
 	defaultXDGIcon   = "text-html"
+
+	// Mod
+	defaultSAMinSleep      = fs.Duration(100 * time.Millisecond)
+	maxServices            = 100
+	defaltPreloadServices  = 50
+	defaultSAPacerMinSleep = fs.Duration(50 * time.Millisecond)
 )
 
 // Globals
@@ -271,6 +282,27 @@ a non root folder as its starting point.
 		}, {
 			Name: "service_account_file",
 			Help: "Service Account Credentials JSON file path \nLeave blank normally.\nNeeded only if you want use SA instead of interactive login." + env.ShellExpandHelp,
+		}, { // Mod
+			Name: "service_account_file_path",
+			Help: "Service Account Credentials JSON folder path.",
+		}, { // Mod
+			Name:     "service_account_min_sleep",
+			Default:  defaultSAMinSleep,
+			Help:     "Minimum time to sleep between change service account.",
+			Hide:     fs.OptionHideConfigurator,
+			Advanced: true,
+		}, { // Mod
+			Name:     "services_preload",
+			Default:  defaltPreloadServices,
+			Help:     "Number of service account's drive service preloaded on startup",
+			Hide:     fs.OptionHideConfigurator,
+			Advanced: true,
+		}, { // Mod
+			Name:     "services_max",
+			Default:  maxServices,
+			Help:     "Max service account's drive service stored on memory",
+			Hide:     fs.OptionHideConfigurator,
+			Advanced: true,
 		}, {
 			Name:     "service_account_credentials",
 			Help:     "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
@@ -564,6 +596,10 @@ type Options struct {
 	Scope                     string               `config:"scope"`
 	RootFolderID              string               `config:"root_folder_id"`
 	ServiceAccountFile        string               `config:"service_account_file"`
+	ServiceAccountFilePath    string               `config:"service_account_file_path"` // Mod
+	ServiceAccountMinSleep    fs.Duration          `config:"service_account_min_sleep"` // Mod
+	ServicesPreload           int                  `config:"services_preload"`          // Mod
+	ServicesMax               int                  `config:"services_max"`              // Mod
 	ServiceAccountCredentials string               `config:"service_account_credentials"`
 	TeamDriveID               string               `config:"team_drive"`
 	AuthOwnerOnly             bool                 `config:"auth_owner_only"`
@@ -618,6 +654,14 @@ type Fs struct {
 	grouping         int32               // number of IDs to search at once in ListR - read with atomic
 	listRmu          *sync.Mutex         // protects listRempties
 	listRempties     map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
+
+    ServiceAccountFiles map[string]int
+	serviceAccountMutex sync.Mutex
+	serviceAccountPool  *ServiceAccountPool
+	minChangeSAInterval time.Duration
+	lastChangeSATime    time.Time
+	FileObj             *fs.Object
+	FileName            string
 }
 
 type baseObject struct {
@@ -647,6 +691,149 @@ type Object struct {
 	url        string // Download URL of this object
 	md5sum     string // md5sum of the object
 	v2Download bool   // generate v2 download link ondemand
+}
+
+// ------------------------------------------------------------
+
+// ServiceAccountPool ...
+type ServiceAccountPool struct {
+	ctx   context.Context
+	Files map[string]struct{} // service account files
+	Max   int
+	svcs  []*drive.Service // drive service
+	mu    *sync.Mutex
+}
+
+func newServiceAccountPool(ctx context.Context, max int) *ServiceAccountPool {
+	p := &ServiceAccountPool{
+		ctx: ctx,
+		Files: make(map[string]struct{}),
+		Max:   max,
+		mu:    new(sync.Mutex),
+	}
+	return p
+}
+
+// Load service account files (.json) from folder
+func (p *ServiceAccountPool) Load(opt *Options) (map[string]struct{}, error) {
+	list := make(map[string]struct{})
+
+	// Read service account file from folder
+	saFolder := opt.ServiceAccountFilePath
+	if len(saFolder) > 0 {
+		fs.Debugf(nil, "Loading Service Account File(s) from %q", saFolder)
+		files, err := ioutil.ReadDir(saFolder)
+		if err != nil {
+			return nil, errors.Wrap(err, "error loading service account from folder")
+		}
+
+		// Add valid service account file
+		for _, file := range files {
+			filePath := path.Join(saFolder, file.Name())
+			if filePath == opt.ServiceAccountFile || path.Ext(filePath) != ".json" {
+				continue
+			}
+			list[filePath] = struct{}{}
+		}
+	}
+
+	p.Files = list
+	fs.Debugf(nil, "Loaded %d Service Account File(s)", len(list))
+	return list, nil
+}
+
+func (p *ServiceAccountPool) _addService(svc *drive.Service) (bool, error) {
+	p.svcs = append([]*drive.Service{svc}, p.svcs...)
+	if len(p.svcs) > p.Max {
+		p.svcs = p.svcs[:p.Max]
+	}
+	return true, nil
+}
+
+// AddService to the front
+func (p *ServiceAccountPool) AddService(svc *drive.Service) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p._addService(svc)
+}
+
+// GetService from the front
+func (p *ServiceAccountPool) GetService() (svc *drive.Service, err error) {
+	if len(p.svcs) == 0 {
+		return nil, errors.Errorf("No available services")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	svc, p.svcs = p.svcs[0], append(p.svcs[1:], p.svcs[0])
+	return
+}
+
+// PreloadServices create services and add to front
+func (p *ServiceAccountPool) PreloadServices(f *Fs, count int) ([]*drive.Service, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	svcs := make([]*drive.Service, 0)
+	for file := range p.Files {
+		if len(svcs) >= count {
+			break
+		}
+
+		// Create services
+		if svc, err := createDriveService(p.ctx, &f.opt, file); err != nil {
+			fs.Errorf(nil, "Preloading Service Account (%s): %v", file, err)
+		} else {
+			svcs = append(svcs, svc)
+		}
+	}
+
+	p.svcs = append(svcs, p.svcs...)
+	fs.Debugf(nil, "Preloaded %d Service(s) from Service Account", len(svcs))
+	return svcs, nil
+}
+
+func (p *ServiceAccountPool) _getFile(remove bool) (file string, err error) {
+	files := p.Files
+	if len(files) == 0 {
+		err = errors.Errorf("no available service account file")
+		return
+	}
+
+	keys := []string{}
+	for k := range files {
+		keys = append(keys, k)
+	}
+	r := rand.Intn(len(keys))
+	file = keys[r]
+
+	if remove {
+		delete(files, file)
+	}
+	return
+}
+
+// GetFile return service account file path from pool
+func (p *ServiceAccountPool) GetFile(remove bool) (file string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p._getFile(remove)
+}
+
+func createDriveService(ctx context.Context, opt *Options, file string) (svc *drive.Service, err error) {
+	// fs.Debugf(nil, "Preloading Service Account File from %s", file)
+	loadedCreds, err := ioutil.ReadFile(os.ExpandEnv(file))
+	if err != nil {
+		return nil, errors.Wrap(err, "error opening service account credentials file")
+	}
+	oAuthClient, err := getServiceAccountClient(ctx, opt, loadedCreds)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create oauth client from service account")
+	}
+	svc, err = drive.New(oAuthClient)
+	if err != nil {
+		return nil, errors.Wrap(err, "couldn't create Drive client")
+	}
+	return svc, err
 }
 
 // ------------------------------------------------------------
@@ -690,7 +877,20 @@ func (f *Fs) shouldRetry(ctx context.Context, err error) (bool, error) {
 		}
 		if len(gerr.Errors) > 0 {
 			reason := gerr.Errors[0].Reason
-			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" {
+			message := gerr.Errors[0].Message
+			if reason == "rateLimitExceeded" || reason == "userRateLimitExceeded" || (reason == "dailyLimitExceededUnreg" || strings.HasPrefix(message, "Daily Limit")) {
+				// Mod: change service account
+				f.serviceAccountMutex.Lock()
+				defer f.serviceAccountMutex.Unlock()
+				if ok, _ := f.shouldChangeSA(); ok {
+					if e := f.changeServiceAccount(ctx, reason); e != nil {
+						fs.Errorf(nil, "Change service account error: %v", e)
+					} else {
+						f.serviceAccountPool.AddService(f.svc)
+					}
+					return true, err
+				}
+
 				if f.opt.StopOnUploadLimit && gerr.Errors[0].Message == "User rate limit exceeded." {
 					fs.Errorf(f, "Received upload limit error: %v", err)
 					return false, fserrors.FatalError(err)
@@ -763,7 +963,6 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 		}
 		query = append(query, q)
 	}
-
 	// Search with sharedWithMe will always return things listed in "Shared With Me" (without any parents)
 	// We must not filter with parent when we try list "ROOT" with drive-shared-with-me
 	// If we need to list file inside those shared folders, we must search it without sharedWithMe
@@ -822,7 +1021,14 @@ func (f *Fs) list(ctx context.Context, dirIDs []string, title string, directorie
 	if filesOnly {
 		query = append(query, fmt.Sprintf("mimeType!='%s'", driveFolderType))
 	}
-	list := f.svc.Files.List()
+
+	// Mod
+	svc := f.svc
+	if s, _ := f.serviceAccountPool.GetService(); err == nil && s != nil {
+		svc = s
+	}
+
+	list := svc.Files.List()
 	if len(query) > 0 {
 		list.Q(strings.Join(query, " and "))
 		// fmt.Printf("list Query = %q\n", query)
@@ -1018,6 +1224,7 @@ func createOAuthClient(ctx context.Context, opt *Options, name string, m configm
 		opt.ServiceAccountCredentials = string(loadedCreds)
 	}
 	if opt.ServiceAccountCredentials != "" {
+		// fmt.Printf("Initial SA Client %s \n", opt.ServiceAccountCredentials[0:250])
 		oAuthClient, err = getServiceAccountClient(ctx, opt, []byte(opt.ServiceAccountCredentials))
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to create oauth client from service account")
@@ -1062,6 +1269,33 @@ func (f *Fs) setUploadCutoff(cs fs.SizeSuffix) (old fs.SizeSuffix, err error) {
 	return
 }
 
+func parseRootID(s string) (rootID string, err error) {
+	re := regexp.MustCompile(`\{([^}]{5,})\}`)
+	m := re.FindStringSubmatch(s)
+	if m == nil {
+		return "", errors.Errorf("%s doesn't not contain valid id", s)
+	}
+	rootID = m[1]
+
+	if strings.HasPrefix(rootID, "http") {
+		// folders - https://drive.google.com/drive/u/0/folders/
+		// file - https://drive.google.com/file/d/
+		re := regexp.MustCompile(`\/(folders|files|file\/d)(\/([A-Za-z0-9_-]{6,}))+\/?`)
+		if m := re.FindStringSubmatch(rootID); m != nil {
+			rootID = m[len(m)-1]
+			return
+		}
+
+		// id - https://drive.google.com/open?id=
+		re = regexp.MustCompile(`.+id=([A-Za-z0-9_-]{6,}).?`)
+		if m := re.FindStringSubmatch(rootID); m != nil {
+			rootID = m[1]
+			return
+		}
+	}
+	return
+}
+
 // newFs partially constructs Fs from the path
 //
 // It constructs a valid Fs but doesn't attempt to figure out whether
@@ -1070,6 +1304,15 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 	// Parse config into Options struct
 	opt := new(Options)
 	err := configstruct.Set(m, opt)
+
+	// DriveMod: parse object id from path remote:{ID}
+	if rootID, _ := parseRootID(path); len(rootID) > 6 {
+		// fs.Debugf(nil, "Root ID detected: %s", rootID)
+		name += rootID
+		// opt.RootFolderID = rootID
+		path = path[strings.Index(path, "}")+1:]
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -1080,6 +1323,16 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 	err = checkUploadChunkSize(opt.ChunkSize)
 	if err != nil {
 		return nil, errors.Wrap(err, "drive: chunk size")
+	}
+
+	// Mod: create service account pool
+	pool := newServiceAccountPool(ctx, opt.ServicesMax)
+	if _, err := pool.Load(opt); err == nil {
+		// Assign default service account file if not set
+		if file, err := pool.GetFile(true); err == nil {
+			opt.ServiceAccountFile = file
+			fs.Debugf(nil, "Assigned Service Account File to %s", file)
+		}
 	}
 
 	oAuthClient, err := createOAuthClient(ctx, opt, name, m)
@@ -1103,6 +1356,7 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 		grouping:     listRGrouping,
 		listRmu:      new(sync.Mutex),
 		listRempties: make(map[string]struct{}),
+		serviceAccountPool: pool,
 	}
 	f.isTeamDrive = opt.TeamDriveID != ""
 	f.fileFields = f.getFileFields()
@@ -1128,6 +1382,16 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 		}
 	}
 
+	// Mod: Preload services
+	if len(f.serviceAccountPool.Files) > 0 {
+		if svcs, err := f.serviceAccountPool.PreloadServices(f, f.opt.ServicesPreload); err == nil {
+			if len(svcs) > 10 && opt.PacerMinSleep >= defaultMinSleep {
+				opt.PacerMinSleep = defaultSAPacerMinSleep
+				f.pacer = fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(f.opt.PacerMinSleep), pacer.Burst(f.opt.PacerBurst)))
+			}
+		}
+	}
+
 	return f, nil
 }
 
@@ -1136,6 +1400,39 @@ func NewFs(ctx context.Context, name, path string, m configmap.Mapper) (fs.Fs, e
 	f, err := newFs(ctx, name, path, m)
 	if err != nil {
 		return nil, err
+	}
+
+	// DriveMod: parse object id from path remote:{ID}
+	// isFileID := false
+	var srcFile *drive.File
+	if rootID, _ := parseRootID(path); len(rootID) > 6 {
+		f.opt.RootFolderID = rootID
+
+		err = f.pacer.Call(func() (bool, error) {
+			srcFile, err = f.svc.Files.Get(rootID).
+				Fields("name", "id", "size", "mimeType", "driveId").
+				SupportsAllDrives(true).
+				Do()
+			return f.shouldRetry(ctx, err)
+		})
+		if err == nil {
+			if srcFile.MimeType != "" && srcFile.MimeType != "application/vnd.google-apps.folder" {
+				fs.Debugf(nil, "Root ID (File): %s", rootID)
+			} else {
+				if srcFile.DriveId == rootID {
+					fs.Debugf(nil, "Root ID (Drive): %s", rootID)
+					f.opt.RootFolderID = ""
+					f.opt.TeamDriveID = rootID
+				} else {
+					fs.Debugf(nil, "Root ID (Folder): %s", rootID)
+					f.opt.RootFolderID = rootID
+				}
+				srcFile = nil
+			}
+			f.isTeamDrive = f.opt.TeamDriveID != ""
+		} else {
+			return nil, err
+		}
 	}
 
 	// Set the root folder ID
@@ -1178,6 +1475,21 @@ func NewFs(ctx context.Context, name, path string, m configmap.Mapper) (fs.Fs, e
 	_, f.importMimeTypes, err = parseExtensions(f.opt.ImportExtensions)
 	if err != nil {
 		return nil, err
+	}
+
+	if srcFile != nil {
+		tempF := *f
+		newRoot := ""
+		tempF.dirCache = dircache.New(newRoot, f.rootFolderID, &tempF)
+		tempF.root = newRoot
+		f.dirCache = tempF.dirCache
+		f.root = tempF.root
+
+		extension, exportName, exportMimeType, isDocument := f.findExportFormat(ctx, srcFile)
+		obj, _ := f.newObjectWithExportInfo(ctx, srcFile.Name, srcFile, extension, exportName, exportMimeType, isDocument)
+		f.root = "isFile:" + srcFile.Name
+		f.FileObj = &obj
+		return f, fs.ErrorIsFile
 	}
 
 	// Find the current root
@@ -1381,6 +1693,11 @@ func (f *Fs) newObjectWithExportInfo(
 // NewObject finds the Object at remote.  If it can't be found
 // it returns the error fs.ErrorObjectNotFound.
 func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
+	// DriveMod
+	if f.FileObj != nil {
+		return *f.FileObj, nil
+	}
+
 	info, extension, exportName, exportMimeType, isDocument, err := f.getRemoteInfoWithExport(ctx, remote)
 	if err != nil {
 		return nil, err
@@ -1400,6 +1717,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 
 // FindLeaf finds a directory of name leaf in the folder with ID pathID
 func (f *Fs) FindLeaf(ctx context.Context, pathID, leaf string) (pathIDOut string, found bool, err error) {
+	// fs.Infof(nil, "FindLeaf: %s | %s", f.Name(), leaf)
 	// Find the leaf in pathID
 	pathID = actualID(pathID)
 	found, err = f.list(ctx, []string{pathID}, leaf, true, false, f.opt.TrashedOnly, false, func(item *drive.File) bool {
@@ -1434,18 +1752,181 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 		MimeType:    driveFolderType,
 		Parents:     []string{pathID},
 	}
+
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
-		info, err = f.svc.Files.Create(createInfo).
+		// Mod
+		svc := f.svc
+		if s, _ := f.serviceAccountPool.GetService(); err == nil && s != nil {
+			svc = s
+		}
+
+		info, err = svc.Files.Create(createInfo).
 			Fields("id").
 			SupportsAllDrives(true).
 			Context(ctx).Do()
 		return f.shouldRetry(ctx, err)
 	})
 	if err != nil {
-		return "", err
+		return "", errors.Errorf("Couldn't create directory (%s): %v", leaf, err)
 	}
 	return info.Id, nil
+}
+
+type createDirTask struct {
+	path    string
+	parent  string
+	depth   int
+	retries int
+}
+
+func newCreateDirTasks(path string) createDirTask {
+	parent, _ := dircache.SplitPath(path)
+	return createDirTask{
+		path:   path,
+		parent: parent,
+		depth:  strings.Count(filepath.ToSlash(path), "/"),
+	}
+}
+
+// type createDirTasks []createDirTask
+
+// func (t createDirTasks) Len() int           { return len(t) }
+// func (t createDirTasks) Less(i, j int) bool { return t[i].depth < t[j].depth }
+// func (t createDirTasks) Swap(i, j int)      { t[i], t[j] = t[j], t[i] }
+
+func (f *Fs) createDirsRunner(ctx context.Context, wg *sync.WaitGroup, in chan createDirTask, out chan<- createDirTask, errs chan<- error, cb func(createDirTask) (bool, error)) {
+	for t := range in {
+		ok, err := cb(t)
+		if ok {
+			out <- t
+		} else {
+			if err != nil {
+				if t.retries > f.ci.LowLevelRetries {
+					errs <- err
+				}
+				t.retries = t.retries + 1
+			}
+
+			wg.Add(1)
+			go func() {
+				time.Sleep(time.Duration(100*t.depth+(t.retries+1)*rand.Intn(100)) * time.Millisecond)
+				in <- t
+			}()
+		}
+	}
+}
+
+// CreateDirs makes multiple directory
+func (f *Fs) CreateDirs(ctx context.Context, useCache bool, dirs []string) (count int, err error) {
+	err = f.dirCache.FindRoot(ctx, true)
+
+	// discover new directories
+	tasks := make(map[string]createDirTask)
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		if _, ok := f.dirCache.Get(dir); ok {
+			continue
+		}
+
+		tasks[dir] = newCreateDirTasks(dir)
+
+		for {
+			parent, _ := dircache.SplitPath(dir)
+			if _, ok := f.dirCache.Get(parent); ok {
+				break
+			}
+			tasks[parent] = newCreateDirTasks(parent)
+			dir = parent
+		}
+	}
+
+	mu := sync.Mutex{}
+	wg := sync.WaitGroup{}
+	toBeCreated := make(chan createDirTask, len(tasks))
+	created := make(chan createDirTask)
+	errs := make(chan error)
+
+	processing := make(map[string]struct{})
+	cb := func(t createDirTask) (done bool, err error) {
+		defer func() {
+			wg.Done()
+		}()
+
+		if _, ok := f.dirCache.Get(t.path); ok {
+			return true, nil
+		}
+
+		mu.Lock()
+		if _, ok := processing[t.path]; ok {
+			mu.Unlock()
+			return false, nil
+		}
+		processing[t.path] = struct{}{}
+		mu.Unlock()
+
+		parent, leaf := dircache.SplitPath(t.path)
+		parentID, ok := f.dirCache.Get(parent)
+		if ok {
+			var newID string
+			if newID, err = f.CreateDir(ctx, parentID, leaf); err == nil {
+				// fs.Infof(nil, "%s: Directory Created", t.path)
+				f.dirCache.Put(t.path, newID)
+				done = true
+			}
+		}
+
+		mu.Lock()
+		delete(processing, t.path)
+		mu.Unlock()
+
+		return done, err
+	}
+
+	// start workers
+	for i := 0; i < f.ci.Transfers; i++ {
+		go f.createDirsRunner(ctx, &wg, toBeCreated, created, errs, cb)
+	}
+
+	// add tasks (parent existed)
+	for _, t := range tasks {
+		if _, ok := f.dirCache.Get(t.parent); ok {
+			wg.Add(1)
+			toBeCreated <- t
+		}
+	}
+
+	// add tasks (parent created)
+Loop:
+	for {
+		select {
+		case t := <-created:
+			count = count + 1
+
+			delete(tasks, t.path)
+			fs.Infof(nil, "%s: Directory Created (Pending: %d)", t.path, len(tasks))
+			if len(tasks) == 0 {
+				break Loop
+			}
+
+			for _, tt := range tasks {
+				if tt.parent == t.path {
+					wg.Add(1)
+					toBeCreated <- tt
+				}
+			}
+		case err = <-errs:
+			return count, err
+		}
+	}
+
+	wg.Wait()
+	close(toBeCreated)
+	// close(created)
+
+	return count, nil
 }
 
 // isAuthOwned checks if any of the item owners is the authenticated owner
@@ -2346,7 +2827,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 	var info *drive.File
 	err = f.pacer.Call(func() (bool, error) {
-		info, err = f.svc.Files.Copy(id, createInfo).
+		// Mod
+		svc := f.svc
+		if s, _ := f.serviceAccountPool.GetService(); err == nil && s != nil {
+			svc = s
+		}
+
+		info, err = svc.Files.Copy(id, createInfo).
 			Fields(partialFields).
 			SupportsAllDrives(true).
 			KeepRevisionForever(f.opt.KeepRevisionForever).
@@ -2705,7 +3192,12 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 func (f *Fs) changeNotifyStartPageToken(ctx context.Context) (pageToken string, err error) {
 	var startPageToken *drive.StartPageToken
 	err = f.pacer.Call(func() (bool, error) {
-		changes := f.svc.Changes.GetStartPageToken().SupportsAllDrives(true)
+		svc := f.svc
+		if s, _ := f.serviceAccountPool.GetService(); s != nil {
+			svc = s
+		}
+
+		changes := svc.Changes.GetStartPageToken().SupportsAllDrives(true)
 		if f.isTeamDrive {
 			changes.DriveId(f.opt.TeamDriveID)
 		}
@@ -2724,7 +3216,12 @@ func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.
 		var changeList *drive.ChangeList
 
 		err = f.pacer.Call(func() (bool, error) {
-			changesCall := f.svc.Changes.List(pageToken).
+			svc := f.svc
+			if s, _ := f.serviceAccountPool.GetService(); s != nil {
+				svc = s
+			}
+
+			changesCall := svc.Changes.List(pageToken).
 				Fields("nextPageToken,newStartPageToken,changes(fileId,file(name,parents,mimeType))")
 			if f.opt.ListChunk > 0 {
 				changesCall.PageSize(f.opt.ListChunk)
@@ -2831,7 +3328,48 @@ func (f *Fs) changeChunkSize(chunkSizeString string) (err error) {
 	return err
 }
 
+// Mod: shouldChangeSA determines whether multiple service accounts existed
+func (f *Fs) shouldChangeSA() (bool, error) {
+	if len(f.opt.ServiceAccountFilePath) == 0 {
+		return false, nil
+	}
+	if fs.Duration(time.Now().Sub(f.lastChangeSATime)) > f.opt.ServiceAccountMinSleep {
+		return true, nil
+	}
+	return false, nil
+}
+
+// Mod: changeServiceAccount select service account file from pool
+// Load files to pool if empty
+func (f *Fs) changeServiceAccount(ctx context.Context, reason string) (err error) {
+	opt := &f.opt
+
+	// Load  service account files
+	if len(f.serviceAccountPool.Files) == 0 {
+		if _, err := f.serviceAccountPool.Load(opt); err != nil {
+			return err
+		}
+	}
+	if len(f.serviceAccountPool.Files) == 0 {
+		return errors.Errorf("no available service account file")
+	}
+
+	// Select  service account file
+	file, err := f.serviceAccountPool.GetFile(true)
+	if err != nil {
+		return err
+	}
+
+	err = f.changeServiceAccountFile(ctx, file)
+	if err == nil {
+		fs.Debugf(nil, "Service Account Changed (remain: %d, reason: %s)", len(f.serviceAccountPool.Files), reason)
+	}
+	return err
+}
+
 func (f *Fs) changeServiceAccountFile(ctx context.Context, file string) (err error) {
+	f.lastChangeSATime = time.Now()
+
 	fs.Debugf(nil, "Changing Service Account File from %s to %s", f.opt.ServiceAccountFile, file)
 	if file == f.opt.ServiceAccountFile {
 		return nil
@@ -2857,6 +3395,9 @@ func (f *Fs) changeServiceAccountFile(ctx context.Context, file string) (err err
 	if err != nil {
 		return errors.Wrap(err, "drive: failed when making oauth client")
 	}
+
+	f.pacer = fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(f.opt.PacerMinSleep), pacer.Burst(f.opt.PacerBurst)))
+
 	f.client = oAuthClient
 	f.svc, err = drive.New(f.client)
 	if err != nil {
@@ -2968,6 +3509,189 @@ func (f *Fs) listTeamDrives(ctx context.Context) (drives []*drive.Drive, err err
 		listTeamDrives.PageToken(teamDrives.NextPageToken)
 	}
 	return drives, nil
+}
+
+// Create new shared drive and clone permission from srcFs
+func (f *Fs) addDrive(ctx context.Context, name string, srcFs *Fs, replaceMembers bool) (newDrive *drive.Drive, err error) {
+
+	// Get permissions from src
+	var srcPerms []*drive.Permission
+	if srcFs != nil {
+		srcPerms, err = f.getPermissions(ctx, f, srcFs.opt.TeamDriveID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Create drive
+	createInfo := &drive.Drive{
+		Name:   name,
+		Hidden: false,
+	}
+
+	requestID := uuid.New()
+	err = f.pacer.Call(func() (bool, error) {
+		newDrive, err = f.svc.Drives.Create(requestID.String(), createInfo).
+			Do()
+		return f.shouldRetry(ctx, err)
+	})
+	if err != nil {
+		return nil, err
+	}
+	fs.Logf(nil, "Created new shared drive: %s (%s)", newDrive.Name, newDrive.Id)
+
+	// Add permissions
+	if len(srcPerms) > 0 {
+		fs.Infof(nil, "Copying %d members", len(srcPerms))
+
+		added := make(map[string]struct{})
+		for _, srcPerm := range srcPerms {
+			added[srcPerm.EmailAddress] = struct{}{}
+
+			createInfo := &drive.Permission{
+				// DisplayName:       srcPerm.DisplayName,
+				EmailAddress:      srcPerm.EmailAddress,
+				Domain:            srcPerm.Domain,
+				ExpirationTime:    srcPerm.ExpirationTime,
+				PermissionDetails: srcPerm.PermissionDetails,
+				Role:              srcPerm.Role,
+				Type:              srcPerm.Type,
+			}
+
+			var perm *drive.Permission
+			err = f.pacer.Call(func() (bool, error) {
+				perm, err = f.svc.Permissions.Create(newDrive.Id, createInfo).
+					SupportsAllDrives(true).
+					SendNotificationEmail(false).
+					Fields("*").
+					Do()
+				return f.shouldRetry(ctx, err)
+			})
+			if err != nil {
+				fs.Errorf(nil, "Couldn't add member (%s): %v", srcPerm.EmailAddress, err)
+			} else {
+				fs.Infof(nil, "Added %s (%s) to shared drive", perm.EmailAddress, perm.Role)
+			}
+		}
+
+		if replaceMembers {
+			fs.Infof(nil, "Removing unwanted members")
+			perms, err := f.getPermissions(ctx, f, newDrive.Id)
+			if err != nil {
+				return nil, err
+			}
+			for _, perm := range perms {
+				if _, ok := added[perm.EmailAddress]; ok {
+					continue
+				}
+				err = f.pacer.Call(func() (bool, error) {
+					err = f.svc.Permissions.Delete(newDrive.Id, perm.Id).
+						SupportsAllDrives(true).
+						Fields("*").
+						Do()
+					return f.shouldRetry(ctx, err)
+				})
+				if err != nil {
+					fs.Errorf(nil, "Couldn't delete unwanted member (%s): %v", perm.EmailAddress, err)
+				} else {
+					fs.Infof(nil, "Removed %s (%s) from shared drive", perm.EmailAddress, perm.Role)
+				}
+			}
+		}
+	}
+
+	return newDrive, nil
+}
+
+// Delete shared drive
+func (f *Fs) deleteDrive(ctx context.Context, force bool) (err error) {
+	driveID := f.opt.TeamDriveID
+	if driveID == "" {
+		return errors.Errorf("Invalid team drive id", err)
+	}
+
+	// Get drive
+	var target *drive.Drive
+	err = f.pacer.Call(func() (bool, error) {
+		target, err = f.svc.Drives.Get(driveID).
+			Context(ctx).
+			Fields("*").
+			Do()
+		return f.shouldRetry(ctx, err)
+	})
+	if err != nil {
+		return errors.Errorf("Couldn't fetch shared drive: %v", err)
+	}
+
+	if !force {
+		perms, err := f.getPermissions(ctx, f, driveID)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("Confirm to delete shared drive?\n")
+		fmt.Println("--------------------------------")
+		fmt.Printf("Name    : %s\n", target.Name)
+		fmt.Printf("ID      : %s\n", target.Id)
+		fmt.Printf("Created : %s\n", target.CreatedTime)
+		fmt.Printf("Members : \n")
+		if len(perms) > 0 {
+			for _, perm := range perms {
+				switch perm.Role {
+				case "owner", "organizer", "fileOrganizer":
+					fmt.Printf("- %-12s\t%s\n", perm.Role, perm.EmailAddress)
+				default:
+				}
+			}
+		}
+		fmt.Println("--------------------------------")
+		if !config.Confirm(false) {
+			return nil
+		}
+	}
+
+	// Delete drive
+	err = f.pacer.Call(func() (bool, error) {
+		err = f.svc.Drives.Delete(driveID).
+			Context(ctx).
+			Do()
+		return f.shouldRetry(ctx, err)
+	})
+	if err != nil {
+		return errors.Errorf("Couldn't delete shared drive (%s): %v", driveID, err)
+	}
+	fs.Infof(nil, "Deleted shared drive: %s (%s)", target.Name, target.Id)
+	return err
+}
+
+func (f *Fs) getPermissions(ctx context.Context, srcFs *Fs, id string) (perms []*drive.Permission, err error) {
+	list := srcFs.svc.Permissions.List(id).
+		PageSize(100).
+		Fields("*").
+		SupportsAllDrives(true)
+
+	for {
+		var permissions *drive.PermissionList
+		err = f.pacer.Call(func() (bool, error) {
+			permissions, err = list.Context(ctx).Do()
+			return f.shouldRetry(ctx, err)
+		})
+		if err != nil {
+			return nil, errors.Errorf("Couldn't get permissions for item (%s): %v\n", id, err)
+		}
+		for _, perm := range permissions.Permissions {
+			if perm.Deleted {
+				continue
+			}
+			perms = append(perms, perm)
+		}
+		if permissions.NextPageToken == "" {
+			break
+		}
+		list.PageToken(permissions.NextPageToken)
+	}
+
+	return perms, err
 }
 
 type unTrashResult struct {
@@ -3126,6 +3850,51 @@ authenticated with "drive2:" can't read files from "drive:".
 		"target": "optional target remote for the shortcut destination",
 	},
 }, {
+	Name:  "add-drive",
+	Short: "Add new shared drive",
+	Long: `This command add new shared drive and clone permissions (members and roles) if provided.
+
+Usage:
+
+	rclone backend add-drive drive: NewDriveName
+	rclone backend add-drive drive: NewDriveName -o copy-members=shared-drive:
+	rclone backend add-drive drive: NewDriveName -o replace-members=shared-drive:
+`,
+	Opts: map[string]string{
+		"copy-members":    `Copy members from target shared drive to new shared drive`,
+		"replace-members": `Replace members instead of copy`,
+	},
+}, {
+	Name:  "delete-drive",
+	Short: "Delete shared drive",
+	Long: `This command delete shared drive (cannot delete drive with untrashed files).
+	
+Usage:
+	
+	rclone backend delete-drive drive:
+	rclone backend delete-drive drive:{0123ABCDEF-6Uk9PVA}
+	rclone backend delete-drive drive: -o force
+		
+User's confirmation is needed before deleteing.
+	`,
+	Opts: map[string]string{
+		"force": `Delete shared drive without confirmation`,
+	},
+}, {
+	Name:  "lsdrives",
+	Short: "List all shared drives with right",
+	Long: `This command list all shared drives (teamdrives) available to this
+	account formatted for parsing.
+
+Usage:
+
+	rclone backend lsdrives drive: 
+	rclone backend lsdrives drive: -o separator=;
+`,
+	Opts: map[string]string{
+		"separator": `Separator for the items in the format. (default "[TAB]")`,
+	},
+}, {
 	Name:  "drives",
 	Short: "List the Shared Drives available to this account",
 	Long: `This command lists the Shared Drives (Team Drives) available to this
@@ -3260,6 +4029,96 @@ func (f *Fs) Command(ctx context.Context, name string, arg []string, opt map[str
 			}
 		}
 		return f.makeShortcut(ctx, arg[0], dstFs, arg[1])
+	case "add-drive":
+		if len(arg) != 1 {
+			return nil, errors.New("need exactly 1 arguments")
+		}
+
+		var remote string
+		var replaceMembers bool
+		if val, ok := opt["replace-members"]; ok {
+			replaceMembers = true
+			remote = val
+		} else if val, ok := opt["copy-members"]; ok {
+			// copyMembers = true
+			remote = val
+		}
+
+		var srcFs *Fs
+		if remote != "" {
+			targetFs, err := cache.Get(ctx, remote)
+			if err != nil {
+				return nil, errors.Wrap(err, "couldn't find target remote")
+			}
+
+			var ok bool
+			srcFs, ok = targetFs.(*Fs)
+			if !ok {
+				return nil, errors.New("target is not a drive backend")
+			}
+			if !srcFs.isTeamDrive {
+				return nil, errors.New("targetis not a shared drive")
+			}
+		}
+
+		_, err = f.addDrive(ctx, arg[0], srcFs, replaceMembers)
+		return nil, err
+	case "delete-drive":
+		if len(arg) > 0 {
+			return nil, errors.New("no argument is needed")
+		}
+
+		if !f.isTeamDrive {
+			return nil, errors.New("it is not a shared drive")
+		}
+		force := false
+		if _, ok := opt["force"]; ok {
+			force = true
+		}
+		return nil, f.deleteDrive(ctx, force)
+
+	case "lsdrives":
+		if len(arg) >= 1 {
+			return nil, errors.New("no arguments needed")
+		}
+
+		sep := "\t"
+		if s, ok := opt["separator"]; ok {
+			sep = s
+		}
+
+		// fetch drives
+		teamDrives, err := f.listTeamDrives(ctx)
+		if err != nil {
+			return nil, err
+		}
+		driveMap := make(map[string]*drive.Drive)
+		for _, drive := range teamDrives {
+			driveMap[drive.Id] = drive
+		}
+
+		if len(driveMap) == 0 {
+			fs.Infof(f, "No team drives found")
+			return nil, nil
+		}
+
+		// sort
+		keys := make([]string, 0)
+		for _, drive := range driveMap {
+			keys = append(keys, drive.Name)
+		}
+		sort.Strings(keys)
+
+		// print
+		for _, k := range keys {
+			for _, drive := range driveMap {
+				if drive.Name != k {
+					continue
+				}
+				fmt.Printf("%s%s%s\n", drive.Id, sep, drive.Name)
+			}
+		}
+		return nil, nil
 	case "drives":
 		return f.listTeamDrives(ctx)
 	case "untrash":
@@ -3608,6 +4467,7 @@ func (o *baseObject) update(ctx context.Context, updateInfo *drive.File, uploadM
 	if size >= 0 && size < int64(o.fs.opt.UploadCutoff) {
 		// Don't retry, return a retry error instead
 		err = o.fs.pacer.CallNoRetry(func() (bool, error) {
+			// fs.Infof(nil, "SVC::update")
 			info, err = o.fs.svc.Files.Update(actualID(o.id), updateInfo).
 				Media(in, googleapi.ContentType(uploadMimeType)).
 				Fields(partialFields).
