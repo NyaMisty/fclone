@@ -20,7 +20,6 @@ on:
 
 jobs:
   build:
-    if: ${{ github.repository == 'rclone/rclone' || github.event.inputs.manual }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -330,8 +329,13 @@ jobs:
 
        - name: Upload artifacts
          run: |
-           make ci_upload
+           find build -type l -delete
+           #gzip -r9v build
          env:
            RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
          # Upload artifacts if not a PR && not a fork
-         if: github.head_ref == '' && github.repository == 'rclone/rclone'
+
+       - name: "Upload to github artifact"
+         uses: NyaMisty/upload-artifact-as-is@nightly
+         with:
+           path: build
