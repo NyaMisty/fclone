@@ -82,9 +82,11 @@ func (w *MessagedWriter) WriteAt(data []byte, off int64) (n int, err error) {
 // Close closes the writer; subsequent reads from the
 // read half of the pipe will return no bytes and EOF.
 func (w *MessagedWriter) Close() error {
-	err := w.finishBlockWriteTrailer()
-	if err != nil {
-		return err
+	if w.hasWrote {
+		err := w.finishBlockWriteTrailer()
+		if err != nil {
+			return err
+		}
 	}
 	return w.innerWriter.Close()
 }
