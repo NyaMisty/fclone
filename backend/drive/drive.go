@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -28,6 +29,7 @@ import (
 	"sync/atomic"
 	"text/template"
 	"time"
+	"unsafe"
 
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
@@ -655,7 +657,7 @@ type Fs struct {
 	listRmu          *sync.Mutex         // protects listRempties
 	listRempties     map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
 
-    ServiceAccountFiles map[string]int
+	ServiceAccountFiles map[string]int
 	serviceAccountMutex sync.Mutex
 	serviceAccountPool  *ServiceAccountPool
 	minChangeSAInterval time.Duration
@@ -707,7 +709,7 @@ type ServiceAccountPool struct {
 
 func newServiceAccountPool(ctx context.Context, max int) *ServiceAccountPool {
 	p := &ServiceAccountPool{
-		ctx: ctx,
+		ctx:   ctx,
 		Files: make(map[string]struct{}),
 		Max:   max,
 		mu:    new(sync.Mutex),
@@ -769,6 +771,17 @@ func (p *ServiceAccountPool) GetService() (svc *drive.Service, err error) {
 	return
 }
 
+// GetClient gets *http.Client from *drive.Service
+func (p *ServiceAccountPool) GetClient() (client *http.Client, err error) {
+	svc, err := p.GetService()
+	if err != nil {
+		return
+	}
+	vsvcClient := reflect.ValueOf(svc).Elem().FieldByName("client")
+	client = reflect.NewAt(vsvcClient.Elem().Type(), unsafe.Pointer(vsvcClient.Elem().UnsafeAddr())).Interface().(*http.Client)
+	return
+}
+
 // PreloadServices create services and add to front
 func (p *ServiceAccountPool) PreloadServices(f *Fs, count int) ([]*drive.Service, error) {
 	p.mu.Lock()
@@ -816,7 +829,7 @@ func (p *ServiceAccountPool) _getFile(remove bool) (file string, err error) {
 		//r := rand.Intn(len(keys))
 		file = keys[r]
 		blackTime, ok := serviceAccountBlacklist.Load(file)
-		if !ok || time.Now().Sub(blackTime.(time.Time)) > time.Hour * 25 {
+		if !ok || time.Now().Sub(blackTime.(time.Time)) > time.Hour*25 {
 			serviceAccountBlacklist.Delete(file)
 			found = true
 			break
@@ -1364,15 +1377,15 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 
 	ci := fs.GetConfig(ctx)
 	f := &Fs{
-		name:         name,
-		root:         root,
-		opt:          *opt,
-		ci:           ci,
-		pacer:        fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst))),
-		m:            m,
-		grouping:     listRGrouping,
-		listRmu:      new(sync.Mutex),
-		listRempties: make(map[string]struct{}),
+		name:               name,
+		root:               root,
+		opt:                *opt,
+		ci:                 ci,
+		pacer:              fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst))),
+		m:                  m,
+		grouping:           listRGrouping,
+		listRmu:            new(sync.Mutex),
+		listRempties:       make(map[string]struct{}),
 		serviceAccountPool: pool,
 	}
 	f.isTeamDrive = opt.TeamDriveID != ""
@@ -2613,7 +2626,11 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 		// Make the API request to upload metadata and file data.
 		// Don't retry, return a retry error instead
 		err = f.pacer.CallNoRetry(func() (bool, error) {
-			info, err = f.svc.Files.Create(createInfo).
+			svc := f.svc
+			if s, _ := f.serviceAccountPool.GetService(); s != nil {
+				svc = s
+			}
+			info, err = svc.Files.Create(createInfo).
 				Media(in, googleapi.ContentType(srcMimeType)).
 				Fields(partialFields).
 				SupportsAllDrives(true).
