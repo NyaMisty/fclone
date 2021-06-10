@@ -48,7 +48,8 @@ type File struct {
 	pendingModTime   time.Time                       // will be applied once o becomes available, i.e. after file was written
 	pendingRenameFun func(ctx context.Context) error // will be run/renamed after all writers close
 	appendMode       bool                            // file was opened with O_APPEND
-	sys              atomic.Value                    // user defined info to be attached here
+	messagedWrite    bool
+	sys              atomic.Value // user defined info to be attached here
 
 	muRW sync.Mutex // synchronize RWFileHandle.openPending(), RWFileHandle.close() and File.Remove
 }
@@ -532,6 +533,9 @@ func (f *File) openWrite(flags int) (fh *WriteFileHandle, err error) {
 	}
 	// fs.Debugf(f.Path(), "File.openWrite")
 
+	if d.vfs.Opt.MessagedWrite {
+		f.messagedWrite = true
+	}
 	fh, err = newWriteFileHandle(d, f, f.Path(), flags)
 	if err != nil {
 		fs.Debugf(f.Path(), "File.openWrite failed: %v", err)
