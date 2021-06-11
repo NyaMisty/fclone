@@ -506,8 +506,17 @@ func (f *File) waitForValidObject() (o fs.Object, err error) {
 }
 
 // openRead open the file for read
-func (f *File) openRead() (fh *ReadFileHandle, err error) {
+func (f *File) openRead() (fh Handle, err error) {
 	// if o is nil it isn't valid yet
+	if f.messagedWrite {
+		fh, err = newStubReadFileHandle(f)
+		if err != nil {
+			fs.Debugf(f.Path(), "File.openRead failed: %v", err)
+			return nil, err
+		}
+		return fh, nil
+	}
+
 	_, err = f.waitForValidObject()
 	if err != nil {
 		return nil, err

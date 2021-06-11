@@ -133,7 +133,7 @@ func (w *MessagedWriter) Close() (err error) {
 	} else {
 		// handle qbittorrent downloader's pattern
 		// qbt: 1. open with flags=O_RDWR|O_CREATE|0x40000 2. close 3. open again with O_RDWR
-		time.AfterFunc(30*time.Second, func() {
+		time.AfterFunc(300*time.Second, func() {
 			if w.openCount <= 0 {
 				fs.Infof(w.Id, "Going to late close writer due to openCount gets to %d", w.openCount)
 				err = w.innerWriter.Close()
