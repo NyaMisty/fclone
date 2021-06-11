@@ -19,7 +19,7 @@ jobs:
               with:
                 tag: beta
                 imageName: nyamisty/fclone
-                platform: linux/amd64,linux/386,linux/arm64,linux/arm/v7
+                platform: linux/amd64 #,linux/386,linux/arm64,linux/arm/v7
                 publish: true
                 dockerHubUser: ${{ secrets.DOCKER_HUB_USER }}
                 dockerHubPassword: ${{ secrets.DOCKER_HUB_PASSWORD }}
