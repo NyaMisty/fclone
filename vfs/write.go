@@ -58,6 +58,7 @@ func (w *MessagedWriter) Open() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.openCount++
+	fs.Debugf(w.Id, "file openCount++ to %d", w.openCount)
 }
 func (w *MessagedWriter) blockFinishTrailer() (err error) {
 	// header: [8B-magic"RCLONEMP"][4B-REQTYPE(MSG_WRITE)][8B-off][8B-size]
@@ -118,11 +119,13 @@ func (w *MessagedWriter) Close() (err error) {
 	err = nil
 
 	w.openCount--
+	fs.Debugf(w.Id, "file openCount-- to %d", w.openCount)
 	if w.openCount > 0 {
 		return
 	}
 
 	if w.hasWrote {
+		fs.Infof(w.Id, "Going to close writer due to hasWrote and openCount gets to %d", w.openCount)
 		err := w.blockFinishTrailer()
 		if err != nil {
 			return err
@@ -132,8 +135,9 @@ func (w *MessagedWriter) Close() (err error) {
 	} else {
 		// handle qbittorrent downloader's pattern
 		// qbt: 1. open with flags=O_RDWR|O_CREATE|0x40000 2. close 3. open again with O_RDWR
-		time.AfterFunc(8*time.Second, func() {
+		time.AfterFunc(30*time.Second, func() {
 			if w.openCount <= 0 {
+				fs.Infof(w.Id, "Going to late close writer due to openCount gets to %d", w.openCount)
 				err = w.innerWriter.Close()
 				writerMap.Delete(w.Id)
 			}
@@ -411,7 +415,7 @@ func (fh *WriteFileHandle) Release() error {
 	if err != nil {
 		fs.Errorf(fh.remote, "WriteFileHandle.Release error: %v", err)
 	} else {
-		// fs.Debugf(fh.remote, "WriteFileHandle.Release OK")
+		fs.Debugf(fh.remote, "WriteFileHandle.Release OK")
 	}
 	return err
 }
