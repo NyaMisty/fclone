@@ -13,7 +13,12 @@ import (
 	"github.com/rclone/rclone/fs/operations"
 )
 
+var writerMap sync.Map
+
 type MessagedWriter struct {
+	mu              sync.Mutex
+	openCount       int
+	Id              string
 	innerWriter     io.WriteCloser
 	lastWriteOffset int64
 	wroteBytes      int64
@@ -26,17 +31,35 @@ const (
 	MSG_TRUNC int32 = 2
 )
 
-func NewMessagedWriter(initialWriter io.WriteCloser, messaged bool) *MessagedWriter {
-	ret := &MessagedWriter{
-		innerWriter: initialWriter,
+func GetMessagedWriter(fh *WriteFileHandle, writerFunc func() io.WriteCloser) *MessagedWriter {
+	retWriter := &MessagedWriter{
+		Id:          fh.file.Path(),
+		innerWriter: nil,
 		wroteBytes:  0,
-		messaged:    messaged,
+		messaged:    fh.file.messagedWrite,
 		hasWrote:    false,
 	}
-	return ret
+	tempWriter := retWriter
+	tempWriter.mu.Lock()
+	_retWriter, loaded := writerMap.LoadOrStore(fh.file.Path(), retWriter)
+	retWriter = _retWriter.(*MessagedWriter)
+	if !loaded {
+		retWriter.innerWriter = writerFunc()
+	}
+	tempWriter.mu.Unlock()
+
+	retWriter.mu.Lock()
+	retWriter.openCount++
+	retWriter.mu.Unlock()
+	return retWriter
 }
 
-func (w *MessagedWriter) finishBlockWriteTrailer() (err error) {
+func (w *MessagedWriter) Open() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.openCount++
+}
+func (w *MessagedWriter) blockFinishTrailer() (err error) {
 	// header: [8B-magic"RCLONEMP"][4B-REQTYPE(MSG_WRITE)][8B-off][8B-size]
 	hdr := make([]byte, 8+4+8+8)
 	buf := bytes.NewBuffer(hdr)
@@ -48,24 +71,32 @@ func (w *MessagedWriter) finishBlockWriteTrailer() (err error) {
 	_, err = w.innerWriter.Write(buf.Bytes())
 	return
 }
-
-func (w *MessagedWriter) Truncate(off int64) (err error) {
+func (w *MessagedWriter) truncateTrailer(off int64) (err error) {
 	// header: [8B-magic"RCLONEMP"][4B-REQTYPE(MSG_TRUNC)][8B-off]
 	hdr := make([]byte, 8+4+8)
 	buf := bytes.NewBuffer(hdr)
 	buf.Reset()
 	buf.WriteString("RCLONEMP")
-	binary.Write(buf, binary.BigEndian, MSG_WRITE)
+	binary.Write(buf, binary.BigEndian, MSG_TRUNC)
 	binary.Write(buf, binary.BigEndian, off)
 	_, err = w.innerWriter.Write(buf.Bytes())
 	return
 }
 
+func (w *MessagedWriter) Truncate(off int64) (err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.truncateTrailer(off)
+}
+
 func (w *MessagedWriter) WriteAt(data []byte, off int64) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
 	if !w.hasWrote {
-		err = w.finishBlockWriteTrailer()
+		err = w.blockFinishTrailer()
 	} else if w.lastWriteOffset != off {
-		err = w.finishBlockWriteTrailer()
+		err = w.blockFinishTrailer()
 		w.lastWriteOffset = off
 		w.wroteBytes = 0
 	}
@@ -82,8 +113,14 @@ func (w *MessagedWriter) WriteAt(data []byte, off int64) (n int, err error) {
 // Close closes the writer; subsequent reads from the
 // read half of the pipe will return no bytes and EOF.
 func (w *MessagedWriter) Close() error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.openCount--
+	if w.openCount > 0 {
+		return nil
+	}
 	if w.hasWrote {
-		err := w.finishBlockWriteTrailer()
+		err := w.blockFinishTrailer()
 		if err != nil {
 			return err
 		}
@@ -145,19 +182,22 @@ func (fh *WriteFileHandle) openPending() (err error) {
 		fs.Errorf(fh.remote, "WriteFileHandle: Can't open for write without O_TRUNC on existing file without --vfs-cache-mode >= writes")
 		return EPERM
 	}
-	pipeReader, pipeWriter := io.Pipe()
-	fh.pipeWriter = NewMessagedWriter(pipeWriter, fh.file.messagedWrite)
-	go func() {
-		// NB Rcat deals with Stats.Transferring, etc.
-		o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now())
-		if err != nil {
-			fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
-		}
-		// Close the pipeReader so the pipeWriter fails with ErrClosedPipe
-		_ = pipeReader.Close()
-		fh.o = o
-		fh.result <- err
-	}()
+
+	fh.pipeWriter = GetMessagedWriter(fh, func() io.WriteCloser {
+		pipeReader, pipeWriter := io.Pipe()
+		go func() {
+			// NB Rcat deals with Stats.Transferring, etc.
+			o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now())
+			if err != nil {
+				fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
+			}
+			// Close the pipeReader so the pipeWriter fails with ErrClosedPipe
+			_ = pipeReader.Close()
+			fh.o = o
+			fh.result <- err
+		}()
+		return pipeWriter
+	})
 	fh.file.setSize(0)
 	fh.truncated = true
 	fh.file.Dir().addObject(fh.file) // make sure the directory has this object in it now
