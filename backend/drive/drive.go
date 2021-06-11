@@ -12,25 +12,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
-	"io/ioutil"
-	"math/rand"
-	"mime"
-	"net/http"
-	"os"
-	"path"
-	"path/filepath"
-	"reflect"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"text/template"
-	"time"
-	"unsafe"
-
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
@@ -56,6 +37,22 @@ import (
 	drive_v2 "google.golang.org/api/drive/v2"
 	drive "google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
+	"io"
+	"io/ioutil"
+	"math/rand"
+	"mime"
+	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"text/template"
+	"time"
 )
 
 // Constants
@@ -698,12 +695,17 @@ type Object struct {
 // ------------------------------------------------------------
 var serviceAccountBlacklist sync.Map
 
+type ServiceAccountInfo struct {
+	Service *drive.Service
+	Client  *http.Client
+}
+
 // ServiceAccountPool ...
 type ServiceAccountPool struct {
 	ctx   context.Context
 	Files map[string]struct{} // service account files
 	Max   int
-	svcs  []*drive.Service // drive service
+	svcs  []ServiceAccountInfo // drive service
 	mu    *sync.Mutex
 }
 
@@ -745,8 +747,10 @@ func (p *ServiceAccountPool) Load(opt *Options) (map[string]struct{}, error) {
 	return list, nil
 }
 
-func (p *ServiceAccountPool) _addService(svc *drive.Service) (bool, error) {
-	p.svcs = append([]*drive.Service{svc}, p.svcs...)
+func (p *ServiceAccountPool) _addService(client *http.Client, svc *drive.Service) (bool, error) {
+	p.svcs = append([]ServiceAccountInfo{
+		{svc, client},
+	}, p.svcs...)
 	if len(p.svcs) > p.Max {
 		p.svcs = p.svcs[:p.Max]
 	}
@@ -754,10 +758,10 @@ func (p *ServiceAccountPool) _addService(svc *drive.Service) (bool, error) {
 }
 
 // AddService to the front
-func (p *ServiceAccountPool) AddService(svc *drive.Service) (bool, error) {
+func (p *ServiceAccountPool) AddService(client *http.Client, svc *drive.Service) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p._addService(svc)
+	return p._addService(client, svc)
 }
 
 // GetService from the front
@@ -767,12 +771,12 @@ func (p *ServiceAccountPool) GetService() (svc *drive.Service, err error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	svc, p.svcs = p.svcs[0], append(p.svcs[1:], p.svcs[0])
+	svc, p.svcs = p.svcs[0].Service, append(p.svcs[1:], p.svcs[0])
 	return
 }
 
 // GetClient gets *http.Client from *drive.Service
-func (p *ServiceAccountPool) GetClient() (client *http.Client, err error) {
+/*func (p *ServiceAccountPool) GetClient() (client *http.Client, err error) {
 	svc, err := p.GetService()
 	if err != nil {
 		return
@@ -780,14 +784,23 @@ func (p *ServiceAccountPool) GetClient() (client *http.Client, err error) {
 	vsvcClient := reflect.ValueOf(svc).Elem().FieldByName("client")
 	client = reflect.NewAt(vsvcClient.Elem().Type(), unsafe.Pointer(vsvcClient.Elem().UnsafeAddr())).Interface().(*http.Client)
 	return
+}*/
+func (p *ServiceAccountPool) GetClient() (client *http.Client, err error) {
+	if len(p.svcs) == 0 {
+		return nil, errors.Errorf("No available services")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	client, p.svcs = p.svcs[0].Client, append(p.svcs[1:], p.svcs[0])
+	return
 }
 
 // PreloadServices create services and add to front
-func (p *ServiceAccountPool) PreloadServices(f *Fs, count int) ([]*drive.Service, error) {
+func (p *ServiceAccountPool) PreloadServices(f *Fs, count int) ([]ServiceAccountInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	svcs := make([]*drive.Service, 0)
+	svcs := make([]ServiceAccountInfo, 0)
 	for file := range p.Files {
 		if len(svcs) >= count {
 			break
@@ -849,21 +862,24 @@ func (p *ServiceAccountPool) GetFile(remove bool) (file string, err error) {
 	return p._getFile(remove)
 }
 
-func createDriveService(ctx context.Context, opt *Options, file string) (svc *drive.Service, err error) {
+func createDriveService(ctx context.Context, opt *Options, file string) (svc ServiceAccountInfo, err error) {
 	// fs.Debugf(nil, "Preloading Service Account File from %s", file)
 	loadedCreds, err := ioutil.ReadFile(os.ExpandEnv(file))
 	if err != nil {
-		return nil, errors.Wrap(err, "error opening service account credentials file")
+		err = errors.Wrap(err, "error opening service account credentials file")
+		return
 	}
-	oAuthClient, err := getServiceAccountClient(ctx, opt, loadedCreds)
+	svc.Client, err = getServiceAccountClient(ctx, opt, loadedCreds)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create oauth client from service account")
+		err = errors.Wrap(err, "failed to create oauth client from service account")
+		return
 	}
-	svc, err = drive.New(oAuthClient)
+	svc.Service, err = drive.New(svc.Client)
 	if err != nil {
-		return nil, errors.Wrap(err, "couldn't create Drive client")
+		err = errors.Wrap(err, "couldn't create Drive client")
+		return
 	}
-	return svc, err
+	return
 }
 
 // ------------------------------------------------------------
@@ -915,8 +931,6 @@ func (f *Fs) shouldRetry(ctx context.Context, err error) (bool, error) {
 				if ok, _ := f.shouldChangeSA(); ok {
 					if e := f.changeServiceAccount(ctx, reason); e != nil {
 						fs.Errorf(nil, "Change service account error: %v", e)
-					} else {
-						f.serviceAccountPool.AddService(f.svc)
 					}
 					return true, err
 				}
@@ -3398,6 +3412,7 @@ func (f *Fs) changeServiceAccount(ctx context.Context, reason string) (err error
 	if err == nil {
 		fs.Debugf(nil, "Service Account Changed (remain: %d, reason: %s)", len(f.serviceAccountPool.Files), reason)
 	}
+	f.serviceAccountPool.AddService(f.client, f.svc)
 	return err
 }
 
