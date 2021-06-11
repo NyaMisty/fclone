@@ -4496,6 +4496,7 @@ func (o *linkObject) Open(ctx context.Context, options ...fs.OpenOption) (in io.
 
 func (o *baseObject) update(ctx context.Context, updateInfo *drive.File, uploadMimeType string, in io.Reader,
 	src fs.ObjectInfo) (info *drive.File, err error) {
+	fs.Debugf(o.String(), "Updating file %v", updateInfo.Id)
 	// Make the API request to upload metadata and file data.
 	size := src.Size()
 	if size >= 0 && size < int64(o.fs.opt.UploadCutoff) {
