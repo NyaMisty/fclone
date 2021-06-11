@@ -93,9 +93,9 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 			req.Header.Set("X-Upload-Content-Length", fmt.Sprintf("%v", size))
 		}
 		client := f.client
-		if c, err := f.serviceAccountPool.GetClient(); err == nil && c != nil {
-			client = c
-		}
+		//if c, err := f.serviceAccountPool.GetClient(); err == nil && c != nil {
+		//	client = c
+		//}
 		res, err = client.Do(req)
 		fs.Debugf(f.String()+"/"+remote, "POST start upload %s info %v err %v res %v", req.URL, info, err, res)
 		if err == nil {
