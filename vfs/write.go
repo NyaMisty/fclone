@@ -48,9 +48,7 @@ func GetMessagedWriter(fh *WriteFileHandle, writerFunc func() io.WriteCloser) *M
 	}
 	tempWriter.mu.Unlock()
 
-	retWriter.mu.Lock()
-	retWriter.openCount++
-	retWriter.mu.Unlock()
+	retWriter.Open()
 	return retWriter
 }
 

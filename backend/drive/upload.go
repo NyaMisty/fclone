@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 
 	"github.com/rclone/rclone/fs"
@@ -69,6 +70,7 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 		method = "PATCH"
 	}
 	urls += "?" + params.Encode()
+	debug.PrintStack()
 	var res *http.Response
 	var err error
 	err = f.pacer.Call(func() (bool, error) {
@@ -95,7 +97,7 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 			client = c
 		}
 		res, err = client.Do(req)
-		fs.Debugf(f.String()+"/"+remote, "POST start upload err %v", err)
+		fs.Debugf(f.String()+"/"+remote, "POST start upload %s err %v res %v", req.URL, err, res)
 		if err == nil {
 			defer googleapi.CloseBody(res)
 			err = googleapi.CheckResponse(res)
@@ -222,6 +224,8 @@ func (rx *resumableUpload) Upload(ctx context.Context) (*drive.File, error) {
 
 		start += reqSize
 	}
+
+	fs.Debugf(rx.remote, "Upload finished! ret: %v", rx.ret)
 	// Resume or retry uploads that fail due to connection interruptions or
 	// any 5xx errors, including:
 	//
