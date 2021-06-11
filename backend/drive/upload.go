@@ -97,7 +97,7 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 			client = c
 		}
 		res, err = client.Do(req)
-		fs.Debugf(f.String()+"/"+remote, "POST start upload %s err %v res %v", req.URL, err, res)
+		fs.Debugf(f.String()+"/"+remote, "POST start upload %s info %v err %v res %v", req.URL, info, err, res)
 		if err == nil {
 			defer googleapi.CloseBody(res)
 			err = googleapi.CheckResponse(res)
