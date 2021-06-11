@@ -112,20 +112,35 @@ func (w *MessagedWriter) WriteAt(data []byte, off int64) (n int, err error) {
 
 // Close closes the writer; subsequent reads from the
 // read half of the pipe will return no bytes and EOF.
-func (w *MessagedWriter) Close() error {
+func (w *MessagedWriter) Close() (err error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	err = nil
+
 	w.openCount--
 	if w.openCount > 0 {
-		return nil
+		return
 	}
+
 	if w.hasWrote {
 		err := w.blockFinishTrailer()
 		if err != nil {
 			return err
 		}
+		err = w.innerWriter.Close()
+		writerMap.Delete(w.Id)
+	} else {
+		// handle qbittorrent downloader's pattern
+		// qbt: 1. open with flags=O_RDWR|O_CREATE|0x40000 2. close 3. open again with O_RDWR
+		time.AfterFunc(8*time.Second, func() {
+			if w.openCount <= 0 {
+				err = w.innerWriter.Close()
+				writerMap.Delete(w.Id)
+			}
+		})
 	}
-	return w.innerWriter.Close()
+
+	return
 }
 
 // WriteFileHandle is an open for write handle on a File
