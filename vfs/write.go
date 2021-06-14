@@ -16,14 +16,14 @@ import (
 var writerMap sync.Map
 
 type MessagedWriter struct {
-	mu              sync.Mutex
-	openCount       int
-	Id              string
-	innerWriter     io.WriteCloser
-	lastWriteOffset int64
-	wroteBytes      int64
-	messaged        bool
-	hasWrote        bool
+	mu             sync.Mutex
+	openCount      int
+	Id             string
+	innerWriter    io.WriteCloser
+	curWriteOffset int64
+	wroteBytes     int64
+	messaged       bool
+	hasWrote       bool
 }
 
 const (
@@ -65,7 +65,7 @@ func (w *MessagedWriter) blockFinishTrailer() (err error) {
 	buf.Reset()
 	buf.WriteString("RCLONEMP")
 	binary.Write(buf, binary.BigEndian, MSG_WRITE)
-	binary.Write(buf, binary.BigEndian, w.lastWriteOffset)
+	binary.Write(buf, binary.BigEndian, w.curWriteOffset)
 	binary.Write(buf, binary.BigEndian, w.wroteBytes)
 	_, err = w.innerWriter.Write(buf.Bytes())
 	return
@@ -94,9 +94,9 @@ func (w *MessagedWriter) WriteAt(data []byte, off int64) (n int, err error) {
 
 	if !w.hasWrote {
 		err = w.blockFinishTrailer()
-	} else if w.lastWriteOffset != off {
+	} else if w.curWriteOffset != off {
 		err = w.blockFinishTrailer()
-		w.lastWriteOffset = off
+		w.curWriteOffset = off
 		w.wroteBytes = 0
 	}
 	if err != nil {
@@ -105,7 +105,7 @@ func (w *MessagedWriter) WriteAt(data []byte, off int64) (n int, err error) {
 	w.hasWrote = true
 	n, err = w.innerWriter.Write(data)
 	w.wroteBytes += int64(n)
-	w.lastWriteOffset += int64(n)
+	w.curWriteOffset += int64(n)
 	return
 }
 
@@ -280,9 +280,10 @@ func (fh *WriteFileHandle) writeAt(p []byte, off int64) (n int, err error) {
 	oriSize := fh.file.Size()
 	newSize := oriSize
 	n, err = fh.pipeWriter.WriteAt(p, off)
-	fh.offset = off + int64(n)
-	if fh.offset > oriSize {
-		newSize = fh.offset
+	newOff := off + int64(n)
+	//fh.offset = newOff
+	if newOff > oriSize {
+		newSize = newOff
 	}
 
 	fh.writeCalled = true
@@ -307,7 +308,9 @@ func (fh *WriteFileHandle) Write(p []byte) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 	// Since we can't seek, just call WriteAt with the current offset
-	return fh.writeAt(p, fh.offset)
+	n, err = fh.writeAt(p, fh.offset)
+	fh.offset += int64(n)
+	return
 }
 
 // WriteString a string to the file
