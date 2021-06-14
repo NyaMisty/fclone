@@ -284,6 +284,11 @@ func (fh *WriteFileHandle) writeAt(p []byte, off int64) (n int, err error) {
 	if err = fh.openPending(); err != nil {
 		return 0, err
 	}
+
+	if len(p) == 0 {
+		return 0, nil
+	}
+
 	oriSize := fh.file.Size()
 	newSize := oriSize
 	n, err = fh.pipeWriter.WriteAt(p, off)
