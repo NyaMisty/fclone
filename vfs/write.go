@@ -124,30 +124,37 @@ func (w *MessagedWriter) Close() (err error) {
 
 	waitTime := 180 * time.Second
 	if w.hasWrote {
-		waitTime = 30 * time.Second
+		waitTime = 0 * time.Second
 	}
 
+	destroyFunc := func() {
+		fs.Infof(w.Id, "Going to late close writer due to openCount gets to %d", w.openCount)
+		var err error
+		if w.hasWrote {
+			err = w.blockFinishTrailer()
+			if err != nil {
+				fs.Errorf(w.Id, "Failed to write finish trailer, err: %v", err)
+			}
+		}
+		err = w.innerWriter.Close()
+		if err != nil {
+			fs.Errorf(w.Id, "Failed to close writer, err: %v", err)
+		}
+		writerMap.Delete(w.Id)
+	}
 	// handle qbittorrent downloader's pattern
 	// qbt: 1. open with flags=O_RDWR|O_CREATE|0x40000 2. close 3. open again with O_RDWR
-	time.AfterFunc(waitTime, func() {
-		if w.openCount <= 0 {
-			w.mu.Lock()
-			defer w.mu.Unlock()
-			fs.Infof(w.Id, "Going to late close writer due to openCount gets to %d", w.openCount)
-			var err error
-			if w.hasWrote {
-				err = w.blockFinishTrailer()
-				if err != nil {
-					fs.Errorf(w.Id, "Failed to write finish trailer, err: %v", err)
-				}
+	if waitTime == 0 {
+		destroyFunc()
+	} else {
+		time.AfterFunc(waitTime, func() {
+			if w.openCount <= 0 {
+				w.mu.Lock()
+				defer w.mu.Unlock()
+				destroyFunc()
 			}
-			err = w.innerWriter.Close()
-			if err != nil {
-				fs.Errorf(w.Id, "Failed to close writer, err: %v", err)
-			}
-			writerMap.Delete(w.Id)
-		}
-	})
+		})
+	}
 
 	return
 }
@@ -283,10 +290,6 @@ func (fh *WriteFileHandle) writeAt(p []byte, off int64) (n int, err error) {
 	}
 	if err = fh.openPending(); err != nil {
 		return 0, err
-	}
-
-	if len(p) == 0 {
-		return 0, nil
 	}
 
 	oriSize := fh.file.Size()
