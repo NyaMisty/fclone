@@ -18,7 +18,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"runtime/debug"
 	"strconv"
 
 	"github.com/rclone/rclone/fs"
@@ -52,7 +51,6 @@ type resumableUpload struct {
 
 // Upload the io.Reader in of size bytes with contentType and info
 func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, fileID, remote string, info *drive.File) (*drive.File, error) {
-	fs.Debugf(f.String()+"/"+remote, "Entered resumableUpload")
 	params := url.Values{
 		"alt":        {"json"},
 		"uploadType": {"resumable"},
@@ -70,7 +68,6 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 		method = "PATCH"
 	}
 	urls += "?" + params.Encode()
-	debug.PrintStack()
 	var res *http.Response
 	var err error
 	err = f.pacer.Call(func() (bool, error) {
@@ -97,11 +94,7 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 			client = c
 		}
 
-		_body, _ := googleapi.WithoutDataWrapper.JSONReader(info)
-		bodyBuf := bytes.NewBuffer(make([]byte, 0))
-		bodyBuf.ReadFrom(_body)
 		res, err = client.Do(req)
-		fs.Debugf(f.String()+"/"+remote, "POST start upload %s body %s err %v res %v", req.URL, bodyBuf.String(), err, res)
 		if err == nil {
 			defer googleapi.CloseBody(res)
 			err = googleapi.CheckResponse(res)
@@ -112,7 +105,6 @@ func (f *Fs) Upload(ctx context.Context, in io.Reader, size int64, contentType, 
 		return nil, err
 	}
 	loc := res.Header.Get("Location")
-	fs.Debugf(f.String()+"/"+remote, "Got resumable upload session %v", loc)
 	rx := &resumableUpload{
 		f:             f,
 		remote:        remote,
@@ -228,8 +220,6 @@ func (rx *resumableUpload) Upload(ctx context.Context) (*drive.File, error) {
 
 		start += reqSize
 	}
-
-	fs.Debugf(rx.remote, "Upload finished! ret: %v", rx.ret)
 	// Resume or retry uploads that fail due to connection interruptions or
 	// any 5xx errors, including:
 	//

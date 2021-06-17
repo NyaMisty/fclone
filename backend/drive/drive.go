@@ -12,6 +12,23 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"math/rand"
+	"mime"
+	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"text/template"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
@@ -37,22 +54,6 @@ import (
 	drive_v2 "google.golang.org/api/drive/v2"
 	drive "google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
-	"io"
-	"io/ioutil"
-	"math/rand"
-	"mime"
-	"net/http"
-	"os"
-	"path"
-	"path/filepath"
-	"regexp"
-	"sort"
-	"strconv"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"text/template"
-	"time"
 )
 
 // Constants
@@ -775,16 +776,7 @@ func (p *ServiceAccountPool) GetService() (svc *drive.Service, err error) {
 	return
 }
 
-// GetClient gets *http.Client from *drive.Service
-/*func (p *ServiceAccountPool) GetClient() (client *http.Client, err error) {
-	svc, err := p.GetService()
-	if err != nil {
-		return
-	}
-	vsvcClient := reflect.ValueOf(svc).Elem().FieldByName("client")
-	client = reflect.NewAt(vsvcClient.Elem().Type(), unsafe.Pointer(vsvcClient.Elem().UnsafeAddr())).Interface().(*http.Client)
-	return
-}*/
+// GetClient gets a *http.Client of service account
 func (p *ServiceAccountPool) GetClient() (client *http.Client, err error) {
 	if len(p.svcs) == 0 {
 		return nil, errors.Errorf("No available services")
@@ -842,7 +834,7 @@ func (p *ServiceAccountPool) _getFile(remove bool) (file string, err error) {
 		//r := rand.Intn(len(keys))
 		file = keys[r]
 		blackTime, ok := serviceAccountBlacklist.Load(file)
-		if !ok || time.Now().Sub(blackTime.(time.Time)) > time.Hour*25 {
+		if !ok || time.Now().Sub(blackTime.(time.Time)) > time.Hour * 25 {
 			serviceAccountBlacklist.Delete(file)
 			found = true
 			break
@@ -1391,15 +1383,15 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 
 	ci := fs.GetConfig(ctx)
 	f := &Fs{
-		name:               name,
-		root:               root,
-		opt:                *opt,
-		ci:                 ci,
-		pacer:              fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst))),
-		m:                  m,
-		grouping:           listRGrouping,
-		listRmu:            new(sync.Mutex),
-		listRempties:       make(map[string]struct{}),
+		name:         name,
+		root:         root,
+		opt:          *opt,
+		ci:           ci,
+		pacer:        fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst))),
+		m:            m,
+		grouping:     listRGrouping,
+		listRmu:      new(sync.Mutex),
+		listRempties: make(map[string]struct{}),
 		serviceAccountPool: pool,
 	}
 	f.isTeamDrive = opt.TeamDriveID != ""
@@ -4511,7 +4503,6 @@ func (o *linkObject) Open(ctx context.Context, options ...fs.OpenOption) (in io.
 
 func (o *baseObject) update(ctx context.Context, updateInfo *drive.File, uploadMimeType string, in io.Reader,
 	src fs.ObjectInfo) (info *drive.File, err error) {
-	fs.Debugf(o.String(), "Updating file %v", updateInfo.Id)
 	// Make the API request to upload metadata and file data.
 	size := src.Size()
 	if size >= 0 && size < int64(o.fs.opt.UploadCutoff) {

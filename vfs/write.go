@@ -431,7 +431,7 @@ func (fh *WriteFileHandle) Release() error {
 	if err != nil {
 		fs.Errorf(fh.remote, "WriteFileHandle.Release error: %v", err)
 	} else {
-		fs.Debugf(fh.remote, "WriteFileHandle.Release OK")
+		//fs.Debugf(fh.remote, "WriteFileHandle.Release OK")
 	}
 	return err
 }
