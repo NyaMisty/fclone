@@ -655,7 +655,7 @@ type Fs struct {
 	listRmu          *sync.Mutex         // protects listRempties
 	listRempties     map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
 
-    ServiceAccountFiles map[string]int
+	ServiceAccountFiles map[string]int
 	serviceAccountMutex sync.Mutex
 	serviceAccountPool  *ServiceAccountPool
 	minChangeSAInterval time.Duration
@@ -694,19 +694,25 @@ type Object struct {
 }
 
 // ------------------------------------------------------------
+var serviceAccountBlacklist sync.Map
+
+type ServiceAccountInfo struct {
+	Service *drive.Service
+	Client  *http.Client
+}
 
 // ServiceAccountPool ...
 type ServiceAccountPool struct {
 	ctx   context.Context
 	Files map[string]struct{} // service account files
 	Max   int
-	svcs  []*drive.Service // drive service
+	svcs  []ServiceAccountInfo // drive service
 	mu    *sync.Mutex
 }
 
 func newServiceAccountPool(ctx context.Context, max int) *ServiceAccountPool {
 	p := &ServiceAccountPool{
-		ctx: ctx,
+		ctx:   ctx,
 		Files: make(map[string]struct{}),
 		Max:   max,
 		mu:    new(sync.Mutex),
@@ -742,8 +748,10 @@ func (p *ServiceAccountPool) Load(opt *Options) (map[string]struct{}, error) {
 	return list, nil
 }
 
-func (p *ServiceAccountPool) _addService(svc *drive.Service) (bool, error) {
-	p.svcs = append([]*drive.Service{svc}, p.svcs...)
+func (p *ServiceAccountPool) _addService(client *http.Client, svc *drive.Service) (bool, error) {
+	p.svcs = append([]ServiceAccountInfo{
+		{svc, client},
+	}, p.svcs...)
 	if len(p.svcs) > p.Max {
 		p.svcs = p.svcs[:p.Max]
 	}
@@ -751,10 +759,10 @@ func (p *ServiceAccountPool) _addService(svc *drive.Service) (bool, error) {
 }
 
 // AddService to the front
-func (p *ServiceAccountPool) AddService(svc *drive.Service) (bool, error) {
+func (p *ServiceAccountPool) AddService(client *http.Client, svc *drive.Service) (bool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p._addService(svc)
+	return p._addService(client, svc)
 }
 
 // GetService from the front
@@ -764,16 +772,27 @@ func (p *ServiceAccountPool) GetService() (svc *drive.Service, err error) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	svc, p.svcs = p.svcs[0], append(p.svcs[1:], p.svcs[0])
+	svc, p.svcs = p.svcs[0].Service, append(p.svcs[1:], p.svcs[0])
+	return
+}
+
+// GetClient gets a *http.Client of service account
+func (p *ServiceAccountPool) GetClient() (client *http.Client, err error) {
+	if len(p.svcs) == 0 {
+		return nil, errors.Errorf("No available services")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	client, p.svcs = p.svcs[0].Client, append(p.svcs[1:], p.svcs[0])
 	return
 }
 
 // PreloadServices create services and add to front
-func (p *ServiceAccountPool) PreloadServices(f *Fs, count int) ([]*drive.Service, error) {
+func (p *ServiceAccountPool) PreloadServices(f *Fs, count int) ([]ServiceAccountInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	svcs := make([]*drive.Service, 0)
+	svcs := make([]ServiceAccountInfo, 0)
 	for file := range p.Files {
 		if len(svcs) >= count {
 			break
@@ -803,11 +822,27 @@ func (p *ServiceAccountPool) _getFile(remove bool) (file string, err error) {
 	for k := range files {
 		keys = append(keys, k)
 	}
-	r := rand.Intn(len(keys))
-	file = keys[r]
 
 	if remove {
+		serviceAccountBlacklist.Store(file, time.Now())
 		delete(files, file)
+	}
+
+	rl := rand.Perm(len(keys))
+	found := false
+	for _, r := range rl {
+		//r := rand.Intn(len(keys))
+		file = keys[r]
+		blackTime, ok := serviceAccountBlacklist.Load(file)
+		if !ok || time.Now().Sub(blackTime.(time.Time)) > time.Hour * 25 {
+			serviceAccountBlacklist.Delete(file)
+			found = true
+			break
+		}
+	}
+	if !found {
+		err = errors.Errorf("no available service account file")
+		return
 	}
 	return
 }
@@ -819,21 +854,24 @@ func (p *ServiceAccountPool) GetFile(remove bool) (file string, err error) {
 	return p._getFile(remove)
 }
 
-func createDriveService(ctx context.Context, opt *Options, file string) (svc *drive.Service, err error) {
+func createDriveService(ctx context.Context, opt *Options, file string) (svc ServiceAccountInfo, err error) {
 	// fs.Debugf(nil, "Preloading Service Account File from %s", file)
 	loadedCreds, err := ioutil.ReadFile(os.ExpandEnv(file))
 	if err != nil {
-		return nil, errors.Wrap(err, "error opening service account credentials file")
+		err = errors.Wrap(err, "error opening service account credentials file")
+		return
 	}
-	oAuthClient, err := getServiceAccountClient(ctx, opt, loadedCreds)
+	svc.Client, err = getServiceAccountClient(ctx, opt, loadedCreds)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to create oauth client from service account")
+		err = errors.Wrap(err, "failed to create oauth client from service account")
+		return
 	}
-	svc, err = drive.New(oAuthClient)
+	svc.Service, err = drive.New(svc.Client)
 	if err != nil {
-		return nil, errors.Wrap(err, "couldn't create Drive client")
+		err = errors.Wrap(err, "couldn't create Drive client")
+		return
 	}
-	return svc, err
+	return
 }
 
 // ------------------------------------------------------------
@@ -885,8 +923,6 @@ func (f *Fs) shouldRetry(ctx context.Context, err error) (bool, error) {
 				if ok, _ := f.shouldChangeSA(); ok {
 					if e := f.changeServiceAccount(ctx, reason); e != nil {
 						fs.Errorf(nil, "Change service account error: %v", e)
-					} else {
-						f.serviceAccountPool.AddService(f.svc)
 					}
 					return true, err
 				}
@@ -2596,7 +2632,11 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 		// Make the API request to upload metadata and file data.
 		// Don't retry, return a retry error instead
 		err = f.pacer.CallNoRetry(func() (bool, error) {
-			info, err = f.svc.Files.Create(createInfo).
+			svc := f.svc
+			if s, _ := f.serviceAccountPool.GetService(); s != nil {
+				svc = s
+			}
+			info, err = svc.Files.Create(createInfo).
 				Media(in, googleapi.ContentType(srcMimeType)).
 				Fields(partialFields).
 				SupportsAllDrives(true).
@@ -3364,6 +3404,7 @@ func (f *Fs) changeServiceAccount(ctx context.Context, reason string) (err error
 	if err == nil {
 		fs.Debugf(nil, "Service Account Changed (remain: %d, reason: %s)", len(f.serviceAccountPool.Files), reason)
 	}
+	f.serviceAccountPool.AddService(f.client, f.svc)
 	return err
 }
 
