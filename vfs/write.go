@@ -1,7 +1,9 @@
 package vfs
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"os"
 	"sync"
@@ -11,6 +13,152 @@ import (
 	"github.com/rclone/rclone/fs/operations"
 )
 
+var writerMap sync.Map
+
+type MessagedWriter struct {
+	mu             sync.Mutex
+	openCount      int
+	Id             string
+	innerWriter    io.WriteCloser
+	curWriteOffset int64
+	wroteBytes     int64
+	messaged       bool
+	hasWrote       bool
+}
+
+const (
+	MSG_WRITE int32 = 1
+	MSG_TRUNC int32 = 2
+)
+
+func GetMessagedWriter(fh *WriteFileHandle, writerFunc func() io.WriteCloser) *MessagedWriter {
+	retWriter := &MessagedWriter{
+		Id:          fh.file.Path(),
+		innerWriter: nil,
+		wroteBytes:  0,
+		messaged:    fh.file.messagedWrite,
+		hasWrote:    false,
+	}
+	tempWriter := retWriter
+	tempWriter.mu.Lock()
+	_retWriter, loaded := writerMap.LoadOrStore(fh.file.Path(), retWriter)
+	retWriter = _retWriter.(*MessagedWriter)
+	if !loaded {
+		retWriter.innerWriter = writerFunc()
+	}
+	tempWriter.mu.Unlock()
+
+	retWriter.Open()
+	return retWriter
+}
+
+func (w *MessagedWriter) Open() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.openCount++
+	fs.Debugf(w.Id, "file openCount++ to %d", w.openCount)
+}
+func (w *MessagedWriter) blockFinishTrailer() (err error) {
+	// header: [8B-magic"RCLONEMP"][4B-REQTYPE(MSG_WRITE)][8B-off][8B-size]
+	hdr := make([]byte, 8+4+8+8)
+	buf := bytes.NewBuffer(hdr)
+	buf.Reset()
+	buf.WriteString("RCLONEMP")
+	binary.Write(buf, binary.BigEndian, MSG_WRITE)
+	binary.Write(buf, binary.BigEndian, w.curWriteOffset)
+	binary.Write(buf, binary.BigEndian, w.wroteBytes)
+	_, err = w.innerWriter.Write(buf.Bytes())
+	return
+}
+func (w *MessagedWriter) truncateTrailer(off int64) (err error) {
+	// header: [8B-magic"RCLONEMP"][4B-REQTYPE(MSG_TRUNC)][8B-off]
+	hdr := make([]byte, 8+4+8)
+	buf := bytes.NewBuffer(hdr)
+	buf.Reset()
+	buf.WriteString("RCLONEMP")
+	binary.Write(buf, binary.BigEndian, MSG_TRUNC)
+	binary.Write(buf, binary.BigEndian, off)
+	_, err = w.innerWriter.Write(buf.Bytes())
+	return
+}
+
+func (w *MessagedWriter) Truncate(off int64) (err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.truncateTrailer(off)
+}
+
+func (w *MessagedWriter) WriteAt(data []byte, off int64) (n int, err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if !w.hasWrote {
+		err = w.blockFinishTrailer()
+	} else if w.curWriteOffset != off {
+		err = w.blockFinishTrailer()
+		w.curWriteOffset = off
+		w.wroteBytes = 0
+	}
+	if err != nil {
+		return
+	}
+	w.hasWrote = true
+	n, err = w.innerWriter.Write(data)
+	w.wroteBytes += int64(n)
+	w.curWriteOffset += int64(n)
+	return
+}
+
+// Close closes the writer; subsequent reads from the
+// read half of the pipe will return no bytes and EOF.
+func (w *MessagedWriter) Close() (err error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	err = nil
+
+	w.openCount--
+	fs.Debugf(w.Id, "file openCount-- to %d", w.openCount)
+	if w.openCount > 0 {
+		return
+	}
+
+	waitTime := 180 * time.Second
+	if w.hasWrote {
+		waitTime = 0 * time.Second
+	}
+
+	destroyFunc := func() {
+		fs.Infof(w.Id, "Going to late close writer due to openCount gets to %d", w.openCount)
+		var err error
+		if w.hasWrote {
+			err = w.blockFinishTrailer()
+			if err != nil {
+				fs.Errorf(w.Id, "Failed to write finish trailer, err: %v", err)
+			}
+		}
+		err = w.innerWriter.Close()
+		if err != nil {
+			fs.Errorf(w.Id, "Failed to close writer, err: %v", err)
+		}
+		writerMap.Delete(w.Id)
+	}
+	// handle qbittorrent downloader's pattern
+	// qbt: 1. open with flags=O_RDWR|O_CREATE|0x40000 2. close 3. open again with O_RDWR
+	if waitTime == 0 {
+		destroyFunc()
+	} else {
+		time.AfterFunc(waitTime, func() {
+			if w.openCount <= 0 {
+				w.mu.Lock()
+				defer w.mu.Unlock()
+				destroyFunc()
+			}
+		})
+	}
+
+	return
+}
+
 // WriteFileHandle is an open for write handle on a File
 type WriteFileHandle struct {
 	baseHandle
@@ -18,7 +166,7 @@ type WriteFileHandle struct {
 	cond        *sync.Cond // cond lock for out of sequence writes
 	closed      bool       // set if handle has been closed
 	remote      string
-	pipeWriter  *io.PipeWriter
+	pipeWriter  *MessagedWriter
 	o           fs.Object
 	result      chan error
 	file        *File
@@ -34,6 +182,7 @@ var (
 	_ io.Writer   = (*WriteFileHandle)(nil)
 	_ io.WriterAt = (*WriteFileHandle)(nil)
 	_ io.Closer   = (*WriteFileHandle)(nil)
+	_ io.Seeker   = (*WriteFileHandle)(nil)
 )
 
 func newWriteFileHandle(d *Dir, f *File, remote string, flags int) (*WriteFileHandle, error) {
@@ -64,19 +213,22 @@ func (fh *WriteFileHandle) openPending() (err error) {
 		fs.Errorf(fh.remote, "WriteFileHandle: Can't open for write without O_TRUNC on existing file without --vfs-cache-mode >= writes")
 		return EPERM
 	}
-	var pipeReader *io.PipeReader
-	pipeReader, fh.pipeWriter = io.Pipe()
-	go func() {
-		// NB Rcat deals with Stats.Transferring, etc.
-		o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now())
-		if err != nil {
-			fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
-		}
-		// Close the pipeReader so the pipeWriter fails with ErrClosedPipe
-		_ = pipeReader.Close()
-		fh.o = o
-		fh.result <- err
-	}()
+
+	fh.pipeWriter = GetMessagedWriter(fh, func() io.WriteCloser {
+		pipeReader, pipeWriter := io.Pipe()
+		go func() {
+			// NB Rcat deals with Stats.Transferring, etc.
+			o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now())
+			if err != nil {
+				fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
+			}
+			// Close the pipeReader so the pipeWriter fails with ErrClosedPipe
+			_ = pipeReader.Close()
+			fh.o = o
+			fh.result <- err
+		}()
+		return pipeWriter
+	})
 	fh.file.setSize(0)
 	fh.truncated = true
 	fh.file.Dir().addObject(fh.file) // make sure the directory has this object in it now
@@ -132,17 +284,25 @@ func (fh *WriteFileHandle) writeAt(p []byte, off int64) (n int, err error) {
 	if fh.offset != off {
 		waitSequential("write", fh.remote, fh.cond, fh.file.VFS().Opt.WriteWait, &fh.offset, off)
 	}
-	if fh.offset != off {
+	if fh.offset != off && !fh.file.messagedWrite {
 		fs.Errorf(fh.remote, "WriteFileHandle.Write: can't seek in file without --vfs-cache-mode >= writes")
 		return 0, ESPIPE
 	}
 	if err = fh.openPending(); err != nil {
 		return 0, err
 	}
+
+	oriSize := fh.file.Size()
+	newSize := oriSize
+	n, err = fh.pipeWriter.WriteAt(p, off)
+	newOff := off + int64(n)
+	//fh.offset = newOff
+	if newOff > oriSize {
+		newSize = newOff
+	}
+
 	fh.writeCalled = true
-	n, err = fh.pipeWriter.Write(p)
-	fh.offset += int64(n)
-	fh.file.setSize(fh.offset)
+	fh.file.setSize(newSize)
 	if err != nil {
 		fs.Errorf(fh.remote, "WriteFileHandle.Write error: %v", err)
 		return 0, err
@@ -163,7 +323,9 @@ func (fh *WriteFileHandle) Write(p []byte) (n int, err error) {
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
 	// Since we can't seek, just call WriteAt with the current offset
-	return fh.writeAt(p, fh.offset)
+	n, err = fh.writeAt(p, fh.offset)
+	fh.offset += int64(n)
+	return
 }
 
 // WriteString a string to the file
@@ -269,7 +431,7 @@ func (fh *WriteFileHandle) Release() error {
 	if err != nil {
 		fs.Errorf(fh.remote, "WriteFileHandle.Release error: %v", err)
 	} else {
-		// fs.Debugf(fh.remote, "WriteFileHandle.Release OK")
+		//fs.Debugf(fh.remote, "WriteFileHandle.Release OK")
 	}
 	return err
 }
@@ -281,11 +443,43 @@ func (fh *WriteFileHandle) Stat() (os.FileInfo, error) {
 	return fh.file, nil
 }
 
+// Seek to new file position
+func (fh *WriteFileHandle) Seek(offset int64, whence int) (ret int64, err error) {
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if fh.file.messagedWrite {
+		if fh.closed {
+			return 0, ECLOSED
+		}
+		if !fh.opened && offset == 0 && whence != 2 {
+			return 0, nil
+		}
+		if err = fh.openPending(); err != nil {
+			return ret, err
+		}
+		switch whence {
+		case io.SeekStart:
+			fh.offset = 0
+		case io.SeekEnd:
+			fh.offset = fh.file.Size()
+		}
+		fh.offset += offset
+		// we don't check the offset - the next Read will
+		return fh.offset, nil
+	} else {
+		return 0, ENOSYS
+	}
+}
+
 // Truncate file to given size
 func (fh *WriteFileHandle) Truncate(size int64) (err error) {
 	// defer log.Trace(fh.remote, "size=%d", size)("err=%v", &err)
 	fh.mu.Lock()
 	defer fh.mu.Unlock()
+	if fh.file.messagedWrite {
+		err = fh.pipeWriter.Truncate(size)
+		return
+	}
 	if size != fh.offset {
 		fs.Errorf(fh.remote, "WriteFileHandle: Truncate: Can't change size without --vfs-cache-mode >= writes")
 		return EPERM

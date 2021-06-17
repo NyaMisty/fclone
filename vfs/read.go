@@ -14,6 +14,64 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 )
 
+type StubReadFileHandle struct {
+	baseHandle
+	file *File
+	size int64 // size of the object (0 for unknown length)
+}
+
+func newStubReadFileHandle(f *File) (*StubReadFileHandle, error) {
+	o := f.getObject()
+	return &StubReadFileHandle{
+		file: f,
+		size: nonNegative(o.Size()),
+	}, nil
+}
+
+// String converts it to printable
+func (fh *StubReadFileHandle) String() string {
+	return "<*StubReadFileHandle>"
+}
+
+// Node returns the Node associated with this - satisfies Noder interface
+func (fh *StubReadFileHandle) Node() Node {
+	return fh.file
+}
+
+func (fh *StubReadFileHandle) Seek(offset int64, whence int) (n int64, err error) {
+	return 0, nil
+}
+
+func (fh *StubReadFileHandle) ReadAt(p []byte, off int64) (n int, err error) {
+	return len(p), nil
+}
+
+func (fh *StubReadFileHandle) Read(p []byte) (n int, err error) {
+	return len(p), nil
+}
+
+func (fh *StubReadFileHandle) Close() error {
+	return nil
+}
+
+func (fh *StubReadFileHandle) Flush() error {
+	return nil
+}
+
+func (fh *StubReadFileHandle) Release() error {
+	return nil
+}
+
+// Size returns the size of the underlying file
+func (fh *StubReadFileHandle) Size() int64 {
+	return fh.size
+}
+
+// Stat returns info about the file
+func (fh *StubReadFileHandle) Stat() (os.FileInfo, error) {
+	return fh.file, nil
+}
+
 // ReadFileHandle is an open for read file handle on a File
 type ReadFileHandle struct {
 	baseHandle
