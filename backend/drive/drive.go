@@ -834,7 +834,7 @@ func (p *ServiceAccountPool) _getFile(remove bool) (file string, err error) {
 		//r := rand.Intn(len(keys))
 		file = keys[r]
 		blackTime, ok := serviceAccountBlacklist.Load(file)
-		if !ok || time.Now().Sub(blackTime.(time.Time)) > time.Hour * 25 {
+		if !ok || time.Now().Sub(blackTime.(time.Time)) > time.Hour*25 {
 			serviceAccountBlacklist.Delete(file)
 			found = true
 			break
@@ -1383,15 +1383,15 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 
 	ci := fs.GetConfig(ctx)
 	f := &Fs{
-		name:         name,
-		root:         root,
-		opt:          *opt,
-		ci:           ci,
-		pacer:        fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst))),
-		m:            m,
-		grouping:     listRGrouping,
-		listRmu:      new(sync.Mutex),
-		listRempties: make(map[string]struct{}),
+		name:               name,
+		root:               root,
+		opt:                *opt,
+		ci:                 ci,
+		pacer:              fs.NewPacer(ctx, pacer.NewGoogleDrive(pacer.MinSleep(opt.PacerMinSleep), pacer.Burst(opt.PacerBurst))),
+		m:                  m,
+		grouping:           listRGrouping,
+		listRmu:            new(sync.Mutex),
+		listRempties:       make(map[string]struct{}),
 		serviceAccountPool: pool,
 	}
 	f.isTeamDrive = opt.TeamDriveID != ""
@@ -4429,7 +4429,15 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	if o.v2Download {
 		var v2File *drive_v2.File
 		err = o.fs.pacer.Call(func() (bool, error) {
-			v2File, err = o.fs.v2Svc.Files.Get(actualID(o.id)).
+			client, err := o.fs.serviceAccountPool.GetClient()
+			if err != nil {
+				return false, err
+			}
+			v2svc, err := drive_v2.New(client)
+			if err != nil {
+				return o.fs.shouldRetry(ctx, err)
+			}
+			v2File, err = v2svc.Files.Get(actualID(o.id)).
 				Fields("downloadUrl").
 				SupportsAllDrives(true).
 				Context(ctx).Do()
