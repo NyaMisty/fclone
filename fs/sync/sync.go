@@ -671,9 +671,7 @@ func (s *syncCopyMove) srcParentDirCheck(entry fs.DirEntry) {
 	if parentDir == "." {
 		parentDir = ""
 	}
-	if _, ok := s.srcEmptyDirs[parentDir]; ok {
-		delete(s.srcEmptyDirs, parentDir)
-	}
+	delete(s.srcEmptyDirs, parentDir)
 }
 
 // parseTrackRenamesStrategy turns a config string into a trackRenamesStrategy
