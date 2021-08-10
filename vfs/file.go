@@ -757,7 +757,6 @@ func (f *File) Truncate(size int64) (err error) {
 	f.mu.Lock()
 	writers := make([]Handle, len(f.writers))
 	copy(writers, f.writers)
-	o := f.o
 	f.mu.Unlock()
 
 	// FIXME: handle closing writer
@@ -771,6 +770,12 @@ func (f *File) Truncate(size int64) (err error) {
 				err = truncateErr
 			}
 		}
+		return err
+	}
+
+	// if o is nil it isn't valid yet
+	o, err := f.waitForValidObject()
+	if err != nil {
 		return err
 	}
 
