@@ -398,9 +398,9 @@ func (s *StatsInfo) String() string {
 		}
 	}
 
-	_, _ = fmt.Fprintf(buf, "%s%11s / %s, %s, %s, ETA %s%s%s",
+	_, _ = fmt.Fprintf(buf, "%s%13s / %s, %s, %s, ETA %s%s%s",
 		dateString,
-		fs.SizeSuffix(s.bytes),
+		fs.SizeSuffix(s.bytes).ByteUnit(),
 		fs.SizeSuffix(ts.totalBytes).ByteUnit(),
 		percent(s.bytes, ts.totalBytes),
 		displaySpeedString,
