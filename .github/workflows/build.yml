@@ -184,13 +184,13 @@ jobs:
         shell: bash
         run: |
           make quicktest
-        if: matrix.quicktest
+        if: false
 
       - name: Race test
         shell: bash
         run: |
           make racequicktest
-        if: matrix.racequicktest
+        if: false
 
       - name: Run librclone tests
         shell: bash
@@ -198,14 +198,14 @@ jobs:
           make -C librclone/ctest test
           make -C librclone/ctest clean
           librclone/python/test_rclone.py
-        if: matrix.librclonetest
+        if: false
 
       - name: Compile all architectures test
         shell: bash
         run: |
           make
           make compile_all
-        if: matrix.compile_all
+        if: false
 
       - name: Deploy built binaries
         shell: bash
@@ -218,14 +218,15 @@ jobs:
           rm rclonebuild/*latest*
         env:
           RCLONE_CONFIG_PASS: ${{ secrets.RCLONE_CONFIG_PASS }}
+        # working-directory: '$(modulePath)'
+        # Deploy binaries if enabled in config && not a PR && not a fork
+        #if: matrix.deploy && github.head_ref == '' && github.repository == 'rclone/rclone'
+
       - name: "Upload to github artifact"
         if: ${{ always() }}
         uses: NyaMisty/upload-artifact-as-is@nightly
         with:
           path: rclonebuild
-          # working-directory: '$(modulePath)'
-          # Deploy binaries if enabled in config && not a PR && not a fork
-        #if: matrix.deploy && github.head_ref == '' && github.repository == 'rclone/rclone'
 
   lint:
     if: ${{ github.repository == 'rclone/rclone' || github.event.inputs.manual }}
@@ -359,3 +360,35 @@ jobs:
         uses: NyaMisty/upload-artifact-as-is@nightly
         with:
           path: build
+
+
+  release:
+    name: "release"
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    needs: [build, android]
+    if: always()
+    steps:
+    - name: "Create artifact directory"
+      run: |
+        mkdir -p rclonebuild
+    - name: "Download all artifacts"
+      uses: actions/download-artifact@v2
+      with:
+        path: rclonebuild
+    - name: "Ensure at lease one build succeeded"
+      run: |
+        ls rclonebuild
+        if [ "$(ls -A rclonebuild)" ]; then exit 0; else exit 1; fi
+    - name: "Upload to Github Prerelease"
+      uses: ncipollo/release-action@v1
+      with:
+        artifacts: "rclonebuild/*"
+        token: ${{ secrets.GITHUB_TOKEN }}
+        name: ${{ format('AutoBuild - {0}', github.event.commits[0].message) }}
+        tag: "action_build"
+        commit: master
+        prerelease: true
+        allowUpdates: true
+        removeArtifacts: true
+        artifactErrorsFailBuild: true
