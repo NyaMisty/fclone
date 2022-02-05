@@ -15,10 +15,17 @@ import (
 	"github.com/rclone/rclone/lib/terminal"
 )
 
+const (
+	averagePeriodLength = time.Second
+	averageStopAfter    = time.Minute
+)
+
 // MaxCompletedTransfers specifies maximum number of completed transfers in startedTransfers list
 var MaxCompletedTransfers = 100
 
 // StatsInfo accounts all transfers
+// N.B.: if this struct is modified, please remember to also update sum() function in stats_groups
+// to correctly count the updated fields
 type StatsInfo struct {
 	mu                sync.RWMutex
 	ctx               context.Context
@@ -48,6 +55,18 @@ type StatsInfo struct {
 	oldDuration       time.Duration // duration of transfers we have culled
 	group             string
 	startTime         time.Time // the moment these stats were initialized or reset
+	average           averageValues
+}
+
+type averageValues struct {
+	mu        sync.Mutex
+	lpBytes   int64
+	lpTime    time.Time
+	speed     float64
+	stop      chan bool
+	stopped   sync.WaitGroup
+	startOnce sync.Once
+	stopOnce  sync.Once
 }
 
 // NewStats creates an initialised StatsInfo
@@ -60,6 +79,7 @@ func NewStats(ctx context.Context) *StatsInfo {
 		transferring: newTransferMap(ci.Transfers, "transferring"),
 		inProgress:   newInProgress(ctx),
 		startTime:    time.Now(),
+		average:      averageValues{stop: make(chan bool)},
 	}
 }
 
@@ -109,7 +129,7 @@ func (s *StatsInfo) RemoteStats() (out rc.Params, err error) {
 	return out, nil
 }
 
-// Speed returns the average speed of the transfer in bytes/second
+// speed returns the average speed of the transfer in bytes/second
 //
 // Call with lock held
 func (s *StatsInfo) speed() float64 {
@@ -274,15 +294,59 @@ func (s *StatsInfo) calculateTransferStats() (ts transferStats) {
 	// note that s.bytes already includes transferringBytesDone so
 	// we take it off here to avoid double counting
 	ts.totalBytes = s.transferQueueSize + s.bytes + transferringBytesTotal - transferringBytesDone
-
-	dt := s.totalDuration()
-	ts.transferTime = dt.Seconds()
-	ts.speed = 0.0
-	if dt > 0 {
-		ts.speed = float64(s.bytes) / ts.transferTime
-	}
+	ts.speed = s.average.speed
 
 	return ts
+}
+
+func (s *StatsInfo) averageLoop() {
+	var period float64
+
+	ticker := time.NewTicker(averagePeriodLength)
+	defer ticker.Stop()
+
+	startTime := time.Now()
+	a := &s.average
+	defer a.stopped.Done()
+	for {
+		select {
+		case now := <-ticker.C:
+			a.mu.Lock()
+			var elapsed float64
+			if a.lpTime.IsZero() {
+				elapsed = now.Sub(startTime).Seconds()
+			} else {
+				elapsed = now.Sub(a.lpTime).Seconds()
+			}
+			avg := 0.0
+			if elapsed > 0 {
+				avg = float64(a.lpBytes) / elapsed
+			}
+			if period < averagePeriod {
+				period++
+			}
+			a.speed = (avg + a.speed*(period-1)) / period
+			a.lpBytes = 0
+			a.lpTime = now
+			a.mu.Unlock()
+		case <-a.stop:
+			return
+		}
+	}
+}
+
+func (s *StatsInfo) startAverageLoop() {
+	s.average.startOnce.Do(func() {
+		s.average.stopped.Add(1)
+		go s.averageLoop()
+	})
+}
+
+func (s *StatsInfo) stopAverageLoop() {
+	s.average.stopOnce.Do(func() {
+		close(s.average.stop)
+		s.average.stopped.Wait()
+	})
 }
 
 // String convert the StatsInfo to a string for printing
@@ -336,9 +400,9 @@ func (s *StatsInfo) String() string {
 		}
 	}
 
-	_, _ = fmt.Fprintf(buf, "%s%11s / %s, %s, %s, ETA %s%s%s",
+	_, _ = fmt.Fprintf(buf, "%s%13s / %s, %s, %s, ETA %s%s%s",
 		dateString,
-		fs.SizeSuffix(s.bytes),
+		fs.SizeSuffix(s.bytes).ByteUnit(),
 		fs.SizeSuffix(ts.totalBytes).ByteUnit(),
 		percent(s.bytes, ts.totalBytes),
 		displaySpeedString,
@@ -433,6 +497,10 @@ func (s *StatsInfo) Log() {
 
 // Bytes updates the stats for bytes bytes
 func (s *StatsInfo) Bytes(bytes int64) {
+	s.average.mu.Lock()
+	s.average.lpBytes += bytes
+	s.average.mu.Unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.bytes += bytes
@@ -558,6 +626,9 @@ func (s *StatsInfo) ResetCounters() {
 	s.renames = 0
 	s.startedTransfers = nil
 	s.oldDuration = 0
+
+	s.stopAverageLoop()
+	s.average = averageValues{stop: make(chan bool)}
 }
 
 // ResetErrors sets the errors count to 0 and resets lastError, fatalError and retryError
@@ -638,6 +709,7 @@ func (s *StatsInfo) GetTransfers() int64 {
 func (s *StatsInfo) NewTransfer(obj fs.Object) *Transfer {
 	tr := newTransfer(s, obj)
 	s.transferring.add(tr)
+	s.startAverageLoop()
 	return tr
 }
 
@@ -645,6 +717,7 @@ func (s *StatsInfo) NewTransfer(obj fs.Object) *Transfer {
 func (s *StatsInfo) NewTransferRemoteSize(remote string, size int64) *Transfer {
 	tr := newTransferRemoteSize(s, remote, size, false)
 	s.transferring.add(tr)
+	s.startAverageLoop()
 	return tr
 }
 
@@ -657,6 +730,9 @@ func (s *StatsInfo) DoneTransferring(remote string, ok bool) {
 		s.mu.Lock()
 		s.transfers++
 		s.mu.Unlock()
+	}
+	if s.transferring.empty() {
+		time.AfterFunc(averageStopAfter, s.stopAverageLoop)
 	}
 }
 

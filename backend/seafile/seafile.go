@@ -2,6 +2,7 @@ package seafile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,7 +14,6 @@ import (
 	"time"
 
 	"github.com/coreos/go-semver/semver"
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/backend/seafile/api"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
@@ -60,41 +60,41 @@ func init() {
 		Config:      Config,
 		Options: []fs.Option{{
 			Name:     configURL,
-			Help:     "URL of seafile host to connect to",
+			Help:     "URL of seafile host to connect to.",
 			Required: true,
 			Examples: []fs.OptionExample{{
 				Value: "https://cloud.seafile.com/",
-				Help:  "Connect to cloud.seafile.com",
+				Help:  "Connect to cloud.seafile.com.",
 			}},
 		}, {
 			Name:     configUser,
-			Help:     "User name (usually email address)",
+			Help:     "User name (usually email address).",
 			Required: true,
 		}, {
 			// Password is not required, it will be left blank for 2FA
 			Name:       configPassword,
-			Help:       "Password",
+			Help:       "Password.",
 			IsPassword: true,
 		}, {
 			Name:    config2FA,
-			Help:    "Two-factor authentication ('true' if the account has 2FA enabled)",
+			Help:    "Two-factor authentication ('true' if the account has 2FA enabled).",
 			Default: false,
 		}, {
 			Name: configLibrary,
-			Help: "Name of the library. Leave blank to access all non-encrypted libraries.",
+			Help: "Name of the library.\n\nLeave blank to access all non-encrypted libraries.",
 		}, {
 			Name:       configLibraryKey,
-			Help:       "Library password (for encrypted libraries only). Leave blank if you pass it through the command line.",
+			Help:       "Library password (for encrypted libraries only).\n\nLeave blank if you pass it through the command line.",
 			IsPassword: true,
 		}, {
 			Name:     configCreateLibrary,
-			Help:     "Should rclone create a library if it doesn't exist",
+			Help:     "Should rclone create a library if it doesn't exist.",
 			Advanced: true,
 			Default:  false,
 		}, {
 			// Keep the authentication token after entering the 2FA code
 			Name: configAuthToken,
-			Help: "Authentication token",
+			Help: "Authentication token.",
 			Hide: fs.OptionHideBoth,
 		}, {
 			Name:     config.ConfigEncoding,
@@ -171,14 +171,14 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		var err error
 		opt.Password, err = obscure.Reveal(opt.Password)
 		if err != nil {
-			return nil, errors.Wrap(err, "couldn't decrypt user password")
+			return nil, fmt.Errorf("couldn't decrypt user password: %w", err)
 		}
 	}
 	if opt.LibraryKey != "" {
 		var err error
 		opt.LibraryKey, err = obscure.Reveal(opt.LibraryKey)
 		if err != nil {
-			return nil, errors.Wrap(err, "couldn't decrypt library password")
+			return nil, fmt.Errorf("couldn't decrypt library password: %w", err)
 		}
 	}
 
@@ -282,7 +282,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 		_, err := f.NewObject(ctx, remote)
 		if err != nil {
-			if errors.Cause(err) == fs.ErrorObjectNotFound || errors.Cause(err) == fs.ErrorNotAFile {
+			if errors.Is(err, fs.ErrorObjectNotFound) || errors.Is(err, fs.ErrorNotAFile) {
 				// File doesn't exist so return the original f
 				f.rootDirectory = rootDirectory
 				return f, nil
@@ -305,12 +305,13 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 
 	u, err := url.Parse(serverURL)
 	if err != nil {
-		return nil, errors.Errorf("invalid server URL %s", serverURL)
+		return nil, fmt.Errorf("invalid server URL %s", serverURL)
 	}
 
 	is2faEnabled, _ := m.Get(config2FA)
 	if is2faEnabled != "true" {
-		return nil, errors.New("two-factor authentication is not enabled on this account")
+		// no need to do anything here
+		return nil, nil
 	}
 
 	username, _ := m.Get(configUser)
@@ -325,17 +326,20 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 
 	switch config.State {
 	case "":
-		// Just make sure we do have a password
+		// Empty state means it's the first call to the Config function
 		if password == "" {
-			return fs.ConfigPassword("", "config_password", "Two-factor authentication: please enter your password (it won't be saved in the configuration)")
+			return fs.ConfigPassword("password", "config_password", "Two-factor authentication: please enter your password (it won't be saved in the configuration)")
 		}
-		return fs.ConfigGoto("password")
+		// password was successfully loaded from the config
+		return fs.ConfigGoto("2fa")
 	case "password":
+		// password should be coming from the previous state (entered by the user)
 		password = config.Result
 		if password == "" {
-			return fs.ConfigError("password", "Password can't be blank")
+			return fs.ConfigError("", "Password can't be blank")
 		}
-		m.Set(configPassword, obscure.MustObscure(config.Result))
+		// save it into the configuration file and keep going
+		m.Set(configPassword, obscure.MustObscure(password))
 		return fs.ConfigGoto("2fa")
 	case "2fa":
 		return fs.ConfigInput("2fa_do", "config_2fa", "Two-factor authentication: please enter your 2FA code")
@@ -882,7 +886,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	// 1- rename source
 	err = srcFs.renameDir(ctx, srcLibraryID, srcPath, tempName)
 	if err != nil {
-		return errors.Wrap(err, "Cannot rename source directory to a temporary name")
+		return fmt.Errorf("Cannot rename source directory to a temporary name: %w", err)
 	}
 
 	// 2- move source to destination
@@ -896,7 +900,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 	// 3- rename destination back to source name
 	err = f.renameDir(ctx, dstLibraryID, path.Join(dstDir, tempName), dstName)
 	if err != nil {
-		return errors.Wrap(err, "Cannot rename temporary directory to destination name")
+		return fmt.Errorf("Cannot rename temporary directory to destination name: %w", err)
 	}
 
 	return nil

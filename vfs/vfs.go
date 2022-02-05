@@ -36,6 +36,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/log"
+	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/vfs/vfscache"
 	"github.com/rclone/rclone/vfs/vfscommon"
@@ -239,6 +240,32 @@ func New(f fs.Fs, opt *vfscommon.Options) *VFS {
 	cache.PinUntilFinalized(f, vfs)
 
 	return vfs
+}
+
+// Stats returns info about the VFS
+func (vfs *VFS) Stats() (out rc.Params) {
+	out = make(rc.Params)
+	out["fs"] = fs.ConfigString(vfs.f)
+	out["opt"] = vfs.Opt
+	out["inUse"] = atomic.LoadInt32(&vfs.inUse)
+
+	var (
+		dirs  int
+		files int
+	)
+	vfs.root.walk(func(d *Dir) {
+		dirs++
+		files += len(d.items)
+	})
+	inf := make(rc.Params)
+	out["metadataCache"] = inf
+	inf["dirs"] = dirs
+	inf["files"] = files
+
+	if vfs.cache != nil {
+		out["diskCache"] = vfs.cache.Stats()
+	}
+	return out
 }
 
 // Return the number of active cache entries and a VFS if any are in
@@ -566,7 +593,7 @@ func (vfs *VFS) Statfs() (total, used, free int64) {
 			vfs.usage, err = doAbout(ctx)
 		}
 		if vfs.Opt.UsedIsSize {
-			var usedBySizeAlgorithm int64 = 0
+			var usedBySizeAlgorithm int64
 			// Algorithm from `rclone size`
 			err = walk.ListR(ctx, vfs.f, "", true, -1, walk.ListObjects, func(entries fs.DirEntries) error {
 				entries.ForObject(func(o fs.Object) {

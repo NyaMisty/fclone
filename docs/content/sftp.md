@@ -3,8 +3,7 @@ title: "SFTP"
 description: "SFTP"
 ---
 
-{{< icon "fa fa-server" >}} SFTP
-----------------------------------------
+# {{< icon "fa fa-server" >}} SFTP
 
 SFTP is the [Secure (or SSH) File Transfer
 Protocol](https://en.wikipedia.org/wiki/SSH_File_Transfer_Protocol).
@@ -26,9 +25,11 @@ would list the home directory of the user cofigured in the rclone remote config
 (`i.e /home/sftpuser`). However, `rclone lsd remote:/` would list the root 
 directory for remote machine (i.e. `/`)
 
-"Note that some SFTP servers will need the leading / - Synology is a
+Note that some SFTP servers will need the leading / - Synology is a
 good example of this. rsync.net, on the other hand, requires users to
 OMIT the leading /.
+
+## Configuration
 
 Here is an example of making an SFTP configuration.  First run
 
@@ -37,7 +38,7 @@ Here is an example of making an SFTP configuration.  First run
 This will guide you through an interactive setup process.
 
 ```
-No remotes found - make a new one
+No remotes found, make a new one?
 n) New remote
 s) Set configuration password
 q) Quit config
@@ -55,9 +56,11 @@ Choose a number from below, or type in your own value
  1 / Connect to example.com
    \ "example.com"
 host> example.com
-SSH username, leave blank for current username, $USER
+SSH username
+Enter a string value. Press Enter for the default ("$USER").
 user> sftpuser
-SSH port, leave blank to use default (22)
+SSH port number
+Enter a signed integer. Press Enter for the default (22).
 port>
 SSH password, leave blank to use ssh-agent.
 y) Yes type in my own password
@@ -109,7 +112,7 @@ Mount the remote path `/srv/www-data/` to the local path
 
     rclone mount remote:/srv/www-data/ /mnt/www-data
 
-### SSH Authentication ###
+### SSH Authentication
 
 The SFTP remote supports three authentication methods:
 
@@ -122,25 +125,39 @@ Only unencrypted OpenSSH or PEM encrypted files are supported.
 
 The key file can be specified in either an external file (key_file) or contained within the 
 rclone config file (key_pem).  If using key_pem in the config file, the entry should be on a
-single line with new line ('\n' or '\r\n') separating lines.  i.e. 
+single line with new line ('\n' or '\r\n') separating lines.  i.e.
 
-key_pem = -----BEGIN RSA PRIVATE KEY-----\nMaMbaIXtE\n0gAMbMbaSsd\nMbaass\n-----END RSA PRIVATE KEY-----
+    key_pem = -----BEGIN RSA PRIVATE KEY-----\nMaMbaIXtE\n0gAMbMbaSsd\nMbaass\n-----END RSA PRIVATE KEY-----
 
-This will generate it correctly for key_pem for use in the config:  
+This will generate it correctly for key_pem for use in the config:
 
     awk '{printf "%s\\n", $0}' < ~/.ssh/id_rsa
 
-If you don't specify `pass`, `key_file`, or `key_pem` then rclone will attempt to contact an ssh-agent.
-
-You can also specify `key_use_agent` to force the usage of an ssh-agent. In this case
-`key_file` or `key_pem` can also be specified to force the usage of a specific key in the ssh-agent.
+If you don't specify `pass`, `key_file`, or `key_pem` or `ask_password` then
+rclone will attempt to contact an ssh-agent. You can also specify `key_use_agent`
+to force the usage of an ssh-agent. In this case `key_file` or `key_pem` can
+also be specified to force the usage of a specific key in the ssh-agent.
 
 Using an ssh-agent is the only way to load encrypted OpenSSH keys at the moment.
 
-If you set the `--sftp-ask-password` option, rclone will prompt for a
-password when needed and no password has been configured.
+If you set the `ask_password` option, rclone will prompt for a password when
+needed and no password has been configured.
 
-If you have a certificate then you can provide the path to the public key that contains the certificate.  For example:
+#### Certificate-signed keys
+
+With traditional key-based authentication, you configure your private key only,
+and the public key built into it will be used during the authentication process.
+
+If you have a certificate you may use it to sign your public key, creating a
+separate SSH user certificate that should be used instead of the plain public key
+extracted from the private key. Then you must provide the path to the
+user certificate public key file in `pubkey_file`.
+
+Note: This is not the traditional public key paired with your private key,
+typically saved as `/home/$USER/.ssh/id_rsa.pub`. Setting this path in
+`pubkey_file` will not work.
+
+Example:
 
 ```
 [remote]
@@ -160,7 +177,7 @@ Note: the cert must come first in the file.  e.g.
 cat id_rsa-cert.pub id_rsa > merged_key
 ```
 
-### Host key validation ###
+### Host key validation
 
 By default rclone will not check the server's host key for validation.  This
 can allow an attacker to replace a server with their own and if you use
@@ -211,7 +228,7 @@ and you will need to add the appropriate `@cert-authority` entry.
 The `known_hosts_file` setting can be set during `rclone config` as an
 advanced option.
 
-### ssh-agent on macOS ###
+### ssh-agent on macOS
 
 Note that there seem to be various problems with using an ssh-agent on
 macOS due to recent changes in the OS.  The most effective work-around
@@ -225,7 +242,7 @@ And then at the end of the session
 
 These commands can be used in scripts of course.
 
-### Modified time ###
+### Modified time
 
 Modified times are stored on the server to 1 second precision.
 
@@ -237,25 +254,24 @@ are using one of these servers, you can set the option `set_modtime = false` in
 your RClone backend configuration to disable this behaviour.
 
 {{< rem autogenerated options start" - DO NOT EDIT - instead edit fs.RegInfo in backend/sftp/sftp.go then run make backenddocs" >}}
-### Standard Options
+### Standard options
 
 Here are the standard options specific to sftp (SSH/SFTP Connection).
 
 #### --sftp-host
 
-SSH host to connect to
+SSH host to connect to.
+
+E.g. "example.com".
 
 - Config:      host
 - Env Var:     RCLONE_SFTP_HOST
 - Type:        string
 - Default:     ""
-- Examples:
-    - "example.com"
-        - Connect to example.com
 
 #### --sftp-user
 
-SSH username, leave blank for current username, $USER
+SSH username, leave blank for current username, $USER.
 
 - Config:      user
 - Env Var:     RCLONE_SFTP_USER
@@ -264,7 +280,7 @@ SSH username, leave blank for current username, $USER
 
 #### --sftp-port
 
-SSH port, leave blank to use default (22)
+SSH port, leave blank to use default (22).
 
 - Config:      port
 - Env Var:     RCLONE_SFTP_PORT
@@ -284,7 +300,9 @@ SSH password, leave blank to use ssh-agent.
 
 #### --sftp-key-pem
 
-Raw PEM-encoded private key, If specified, will override key_file parameter.
+Raw PEM-encoded private key.
+
+If specified, will override key_file parameter.
 
 - Config:      key_pem
 - Env Var:     RCLONE_SFTP_KEY_PEM
@@ -293,10 +311,11 @@ Raw PEM-encoded private key, If specified, will override key_file parameter.
 
 #### --sftp-key-file
 
-Path to PEM-encoded private key file, leave blank or set key-use-agent to use ssh-agent.
+Path to PEM-encoded private key file.
+
+Leave blank or set key-use-agent to use ssh-agent.
 
 Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
-
 
 - Config:      key_file
 - Env Var:     RCLONE_SFTP_KEY_FILE
@@ -324,7 +343,6 @@ Optional path to public key file.
 Set this if you have a signed certificate you want to use for authentication.
 
 Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
-
 
 - Config:      pubkey_file
 - Env Var:     RCLONE_SFTP_PUBKEY_FILE
@@ -372,6 +390,7 @@ Those algorithms are insecure and may allow plaintext data to be recovered by an
 #### --sftp-disable-hashcheck
 
 Disable the execution of SSH commands to determine if remote file hashing is available.
+
 Leave blank or set to false to enable hashing (recommended), set to true to disable hashing.
 
 - Config:      disable_hashcheck
@@ -379,7 +398,7 @@ Leave blank or set to false to enable hashing (recommended), set to true to disa
 - Type:        bool
 - Default:     false
 
-### Advanced Options
+### Advanced options
 
 Here are the advanced options specific to sftp (SSH/SFTP Connection).
 
@@ -391,14 +410,13 @@ Set this value to enable server host key validation.
 
 Leading `~` will be expanded in the file name as will environment variables such as `${RCLONE_CONFIG_DIR}`.
 
-
 - Config:      known_hosts_file
 - Env Var:     RCLONE_SFTP_KNOWN_HOSTS_FILE
 - Type:        string
 - Default:     ""
 - Examples:
     - "~/.ssh/known_hosts"
-        - Use OpenSSH's known_hosts file
+        - Use OpenSSH's known_hosts file.
 
 #### --sftp-ask-password
 
@@ -445,7 +463,9 @@ Set the modified time on the remote if set.
 
 #### --sftp-md5sum-command
 
-The command used to read md5 hashes. Leave blank for autodetect.
+The command used to read md5 hashes.
+
+Leave blank for autodetect.
 
 - Config:      md5sum_command
 - Env Var:     RCLONE_SFTP_MD5SUM_COMMAND
@@ -454,7 +474,9 @@ The command used to read md5 hashes. Leave blank for autodetect.
 
 #### --sftp-sha1sum-command
 
-The command used to read sha1 hashes. Leave blank for autodetect.
+The command used to read sha1 hashes.
+
+Leave blank for autodetect.
 
 - Config:      sha1sum_command
 - Env Var:     RCLONE_SFTP_SHA1SUM_COMMAND
@@ -492,7 +514,7 @@ The subsystem option is ignored when server_command is defined.
 
 #### --sftp-use-fstat
 
-If set use fstat instead of stat
+If set use fstat instead of stat.
 
 Some servers limit the amount of open files and calling Stat after opening
 the file will throw an error from the server. Setting this flag will call
@@ -510,7 +532,7 @@ any given time.
 
 #### --sftp-disable-concurrent-reads
 
-If set don't use concurrent reads
+If set don't use concurrent reads.
 
 Normally concurrent reads are safe to use and not using them will
 degrade performance, so this option is disabled by default.
@@ -531,9 +553,24 @@ If concurrent reads are disabled, the use_fstat option is ignored.
 - Type:        bool
 - Default:     false
 
+#### --sftp-disable-concurrent-writes
+
+If set don't use concurrent writes.
+
+Normally rclone uses concurrent writes to upload files. This improves
+the performance greatly, especially for distant servers.
+
+This option disables concurrent writes should that be necessary.
+
+
+- Config:      disable_concurrent_writes
+- Env Var:     RCLONE_SFTP_DISABLE_CONCURRENT_WRITES
+- Type:        bool
+- Default:     false
+
 #### --sftp-idle-timeout
 
-Max time before closing idle connections
+Max time before closing idle connections.
 
 If no connections have been returned to the connection pool in the time
 given, rclone will empty the connection pool.
@@ -548,7 +585,7 @@ Set to 0 to keep connections indefinitely.
 
 {{< rem autogenerated options stop >}}
 
-### Limitations ###
+## Limitations
 
 SFTP supports checksums if the same login has shell access and `md5sum`
 or `sha1sum` as well as `echo` are in the remote's PATH.
@@ -585,7 +622,7 @@ issue](https://github.com/pkg/sftp/issues/156) is fixed.
 Note that since SFTP isn't HTTP based the following flags don't work
 with it: `--dump-headers`, `--dump-bodies`, `--dump-auth`
 
-Note that `--timeout` isn't supported (but `--contimeout` is).
+Note that `--timeout` and `--contimeout` are both supported.
 
 
 ## C14 {#c14}

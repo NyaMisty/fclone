@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -25,7 +26,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/config/configmap"
@@ -89,58 +89,58 @@ func init() {
 		},
 		Options: append(oauthutil.SharedOptions, []fs.Option{{
 			Name: "project_number",
-			Help: "Project number.\nOptional - needed only for list/create/delete buckets - see your developer console.",
+			Help: "Project number.\n\nOptional - needed only for list/create/delete buckets - see your developer console.",
 		}, {
 			Name: "service_account_file",
-			Help: "Service Account Credentials JSON file path\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login." + env.ShellExpandHelp,
+			Help: "Service Account Credentials JSON file path.\n\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login." + env.ShellExpandHelp,
 		}, {
 			Name: "service_account_credentials",
-			Help: "Service Account Credentials JSON blob\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
+			Help: "Service Account Credentials JSON blob.\n\nLeave blank normally.\nNeeded only if you want use SA instead of interactive login.",
 			Hide: fs.OptionHideBoth,
 		}, {
 			Name:    "anonymous",
-			Help:    "Access public buckets and objects without credentials\nSet to 'true' if you just want to download files and don't configure credentials.",
+			Help:    "Access public buckets and objects without credentials.\n\nSet to 'true' if you just want to download files and don't configure credentials.",
 			Default: false,
 		}, {
 			Name: "object_acl",
 			Help: "Access Control List for new objects.",
 			Examples: []fs.OptionExample{{
 				Value: "authenticatedRead",
-				Help:  "Object owner gets OWNER access, and all Authenticated Users get READER access.",
+				Help:  "Object owner gets OWNER access.\nAll Authenticated Users get READER access.",
 			}, {
 				Value: "bucketOwnerFullControl",
-				Help:  "Object owner gets OWNER access, and project team owners get OWNER access.",
+				Help:  "Object owner gets OWNER access.\nProject team owners get OWNER access.",
 			}, {
 				Value: "bucketOwnerRead",
-				Help:  "Object owner gets OWNER access, and project team owners get READER access.",
+				Help:  "Object owner gets OWNER access.\nProject team owners get READER access.",
 			}, {
 				Value: "private",
-				Help:  "Object owner gets OWNER access [default if left blank].",
+				Help:  "Object owner gets OWNER access.\nDefault if left blank.",
 			}, {
 				Value: "projectPrivate",
-				Help:  "Object owner gets OWNER access, and project team members get access according to their roles.",
+				Help:  "Object owner gets OWNER access.\nProject team members get access according to their roles.",
 			}, {
 				Value: "publicRead",
-				Help:  "Object owner gets OWNER access, and all Users get READER access.",
+				Help:  "Object owner gets OWNER access.\nAll Users get READER access.",
 			}},
 		}, {
 			Name: "bucket_acl",
 			Help: "Access Control List for new buckets.",
 			Examples: []fs.OptionExample{{
 				Value: "authenticatedRead",
-				Help:  "Project team owners get OWNER access, and all Authenticated Users get READER access.",
+				Help:  "Project team owners get OWNER access.\nAll Authenticated Users get READER access.",
 			}, {
 				Value: "private",
-				Help:  "Project team owners get OWNER access [default if left blank].",
+				Help:  "Project team owners get OWNER access.\nDefault if left blank.",
 			}, {
 				Value: "projectPrivate",
 				Help:  "Project team members get access according to their roles.",
 			}, {
 				Value: "publicRead",
-				Help:  "Project team owners get OWNER access, and all Users get READER access.",
+				Help:  "Project team owners get OWNER access.\nAll Users get READER access.",
 			}, {
 				Value: "publicReadWrite",
-				Help:  "Project team owners get OWNER access, and all Users get WRITER access.",
+				Help:  "Project team owners get OWNER access.\nAll Users get WRITER access.",
 			}},
 		}, {
 			Name: "bucket_policy_only",
@@ -163,64 +163,112 @@ Docs: https://cloud.google.com/storage/docs/bucket-policy-only
 			Help: "Location for the newly created buckets.",
 			Examples: []fs.OptionExample{{
 				Value: "",
-				Help:  "Empty for default location (US).",
+				Help:  "Empty for default location (US)",
 			}, {
 				Value: "asia",
-				Help:  "Multi-regional location for Asia.",
+				Help:  "Multi-regional location for Asia",
 			}, {
 				Value: "eu",
-				Help:  "Multi-regional location for Europe.",
+				Help:  "Multi-regional location for Europe",
 			}, {
 				Value: "us",
-				Help:  "Multi-regional location for United States.",
+				Help:  "Multi-regional location for United States",
 			}, {
 				Value: "asia-east1",
-				Help:  "Taiwan.",
+				Help:  "Taiwan",
 			}, {
 				Value: "asia-east2",
-				Help:  "Hong Kong.",
+				Help:  "Hong Kong",
 			}, {
 				Value: "asia-northeast1",
-				Help:  "Tokyo.",
+				Help:  "Tokyo",
+			}, {
+				Value: "asia-northeast2",
+				Help:  "Osaka",
+			}, {
+				Value: "asia-northeast3",
+				Help:  "Seoul",
 			}, {
 				Value: "asia-south1",
-				Help:  "Mumbai.",
+				Help:  "Mumbai",
+			}, {
+				Value: "asia-south2",
+				Help:  "Delhi",
 			}, {
 				Value: "asia-southeast1",
-				Help:  "Singapore.",
+				Help:  "Singapore",
+			}, {
+				Value: "asia-southeast2",
+				Help:  "Jakarta",
 			}, {
 				Value: "australia-southeast1",
-				Help:  "Sydney.",
+				Help:  "Sydney",
+			}, {
+				Value: "australia-southeast2",
+				Help:  "Melbourne",
 			}, {
 				Value: "europe-north1",
-				Help:  "Finland.",
+				Help:  "Finland",
 			}, {
 				Value: "europe-west1",
-				Help:  "Belgium.",
+				Help:  "Belgium",
 			}, {
 				Value: "europe-west2",
-				Help:  "London.",
+				Help:  "London",
 			}, {
 				Value: "europe-west3",
-				Help:  "Frankfurt.",
+				Help:  "Frankfurt",
 			}, {
 				Value: "europe-west4",
-				Help:  "Netherlands.",
+				Help:  "Netherlands",
+			}, {
+				Value: "europe-west6",
+				Help:  "Zürich",
+			}, {
+				Value: "europe-central2",
+				Help:  "Warsaw",
 			}, {
 				Value: "us-central1",
-				Help:  "Iowa.",
+				Help:  "Iowa",
 			}, {
 				Value: "us-east1",
-				Help:  "South Carolina.",
+				Help:  "South Carolina",
 			}, {
 				Value: "us-east4",
-				Help:  "Northern Virginia.",
+				Help:  "Northern Virginia",
 			}, {
 				Value: "us-west1",
-				Help:  "Oregon.",
+				Help:  "Oregon",
 			}, {
 				Value: "us-west2",
-				Help:  "California.",
+				Help:  "California",
+			}, {
+				Value: "us-west3",
+				Help:  "Salt Lake City",
+			}, {
+				Value: "us-west4",
+				Help:  "Las Vegas",
+			}, {
+				Value: "northamerica-northeast1",
+				Help:  "Montréal",
+			}, {
+				Value: "northamerica-northeast2",
+				Help:  "Toronto",
+			}, {
+				Value: "southamerica-east1",
+				Help:  "São Paulo",
+			}, {
+				Value: "southamerica-west1",
+				Help:  "Santiago",
+			}, {
+				Value: "asia1",
+				Help:  "Dual region: asia-northeast1 and asia-northeast2.",
+			}, {
+				Value: "eur4",
+				Help:  "Dual region: europe-north1 and europe-west4.",
+			}, {
+				Value: "nam4",
+				Help:  "Dual region: us-central1 and us-east1.",
 			}},
 		}, {
 			Name: "storage_class",
@@ -375,7 +423,7 @@ func (o *Object) split() (bucket, bucketPath string) {
 func getServiceAccountClient(ctx context.Context, credentialsData []byte) (*http.Client, error) {
 	conf, err := google.JWTConfigFromJSON(credentialsData, storageConfig.Scopes...)
 	if err != nil {
-		return nil, errors.Wrap(err, "error processing credentials")
+		return nil, fmt.Errorf("error processing credentials: %w", err)
 	}
 	ctxWithSpecialClient := oauthutil.Context(ctx, fshttp.NewClient(ctx))
 	return oauth2.NewClient(ctxWithSpecialClient, conf.TokenSource(ctxWithSpecialClient)), nil
@@ -408,7 +456,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if opt.ServiceAccountCredentials == "" && opt.ServiceAccountFile != "" {
 		loadedCreds, err := ioutil.ReadFile(env.ShellExpand(opt.ServiceAccountFile))
 		if err != nil {
-			return nil, errors.Wrap(err, "error opening service account credentials file")
+			return nil, fmt.Errorf("error opening service account credentials file: %w", err)
 		}
 		opt.ServiceAccountCredentials = string(loadedCreds)
 	}
@@ -417,7 +465,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	} else if opt.ServiceAccountCredentials != "" {
 		oAuthClient, err = getServiceAccountClient(ctx, []byte(opt.ServiceAccountCredentials))
 		if err != nil {
-			return nil, errors.Wrap(err, "failed configuring Google Cloud Storage Service Account")
+			return nil, fmt.Errorf("failed configuring Google Cloud Storage Service Account: %w", err)
 		}
 	} else {
 		oAuthClient, _, err = oauthutil.NewClient(ctx, name, m, storageConfig)
@@ -425,7 +473,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			ctx := context.Background()
 			oAuthClient, err = google.DefaultClient(ctx, storage.DevstorageFullControlScope)
 			if err != nil {
-				return nil, errors.Wrap(err, "failed to configure Google Cloud Storage")
+				return nil, fmt.Errorf("failed to configure Google Cloud Storage: %w", err)
 			}
 		}
 	}
@@ -449,7 +497,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	f.client = oAuthClient
 	f.svc, err = storage.New(f.client)
 	if err != nil {
-		return nil, errors.Wrap(err, "couldn't create Google Cloud Storage client")
+		return nil, fmt.Errorf("couldn't create Google Cloud Storage client: %w", err)
 	}
 
 	if f.rootBucket != "" && f.rootDirectory != "" {
@@ -759,10 +807,10 @@ func (f *Fs) makeBucket(ctx context.Context, bucket string) (err error) {
 			return nil
 		} else if gErr, ok := err.(*googleapi.Error); ok {
 			if gErr.Code != http.StatusNotFound {
-				return errors.Wrap(err, "failed to get bucket")
+				return fmt.Errorf("failed to get bucket: %w", err)
 			}
 		} else {
-			return errors.Wrap(err, "failed to get bucket")
+			return fmt.Errorf("failed to get bucket: %w", err)
 		}
 
 		if f.opt.ProjectNumber == "" {
@@ -1065,7 +1113,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	_, isRanging := req.Header["Range"]
 	if !(res.StatusCode == http.StatusOK || (isRanging && res.StatusCode == http.StatusPartialContent)) {
 		_ = res.Body.Close() // ignore error
-		return nil, errors.Errorf("bad response: %d: %s", res.StatusCode, res.Status)
+		return nil, fmt.Errorf("bad response: %d: %s", res.StatusCode, res.Status)
 	}
 	return res.Body, nil
 }

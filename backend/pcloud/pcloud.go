@@ -2,14 +2,13 @@
 // object storage system.
 package pcloud
 
-// FIXME implement ListR? /listfolder can do recursive lists
-
 // FIXME cleanup returns login required?
 
 // FIXME mime type? Fix overview if implement.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/backend/pcloud/api"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config"
@@ -27,6 +25,7 @@ import (
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/walk"
 	"github.com/rclone/rclone/lib/dircache"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/oauthutil"
@@ -166,6 +165,7 @@ type Object struct {
 	id          string    // ID of the object
 	md5         string    // MD5 if known
 	sha1        string    // SHA1 if known
+	sha256      string    // SHA256 if known
 	link        *api.GetFileLinkResult
 }
 
@@ -245,7 +245,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.It
 		return nil, err
 	}
 
-	found, err := f.listAll(ctx, directoryID, false, true, func(item *api.Item) bool {
+	found, err := f.listAll(ctx, directoryID, false, true, false, func(item *api.Item) bool {
 		if item.Name == leaf {
 			info = item
 			return true
@@ -289,7 +289,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	root = parsePath(root)
 	oAuthClient, ts, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure Pcloud")
+		return nil, fmt.Errorf("failed to configure Pcloud: %w", err)
 	}
 	updateTokenURL(oauthConfig, opt.Hostname)
 
@@ -379,7 +379,7 @@ func (f *Fs) NewObject(ctx context.Context, remote string) (fs.Object, error) {
 // FindLeaf finds a directory of name leaf in the folder with ID pathID
 func (f *Fs) FindLeaf(ctx context.Context, pathID, leaf string) (pathIDOut string, found bool, err error) {
 	// Find the leaf in pathID
-	found, err = f.listAll(ctx, pathID, true, false, func(item *api.Item) bool {
+	found, err = f.listAll(ctx, pathID, true, false, false, func(item *api.Item) bool {
 		if item.Name == leaf {
 			pathIDOut = item.ID
 			return true
@@ -445,14 +445,16 @@ type listAllFn func(*api.Item) bool
 // Lists the directory required calling the user function on each item found
 //
 // If the user fn ever returns true then it early exits with found = true
-func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, filesOnly bool, fn listAllFn) (found bool, err error) {
+func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, filesOnly bool, recursive bool, fn listAllFn) (found bool, err error) {
 	opts := rest.Opts{
 		Method:     "GET",
 		Path:       "/listfolder",
 		Parameters: url.Values{},
 	}
+	if recursive {
+		opts.Parameters.Set("recursive", "1")
+	}
 	opts.Parameters.Set("folderid", dirIDtoNumber(dirID))
-	// FIXME can do recursive
 
 	var result api.ItemResult
 	var resp *http.Response
@@ -462,26 +464,71 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return found, errors.Wrap(err, "couldn't list files")
+		return found, fmt.Errorf("couldn't list files: %w", err)
 	}
-	for i := range result.Metadata.Contents {
-		item := &result.Metadata.Contents[i]
-		if item.IsFolder {
-			if filesOnly {
-				continue
+	var recursiveContents func(is []api.Item, path string)
+	recursiveContents = func(is []api.Item, path string) {
+		for i := range is {
+			item := &is[i]
+			if item.IsFolder {
+				if filesOnly {
+					continue
+				}
+			} else {
+				if directoriesOnly {
+					continue
+				}
 			}
-		} else {
-			if directoriesOnly {
-				continue
+			item.Name = path + f.opt.Enc.ToStandardName(item.Name)
+			if fn(item) {
+				found = true
+				break
+			}
+			if recursive {
+				recursiveContents(item.Contents, item.Name+"/")
 			}
 		}
-		item.Name = f.opt.Enc.ToStandardName(item.Name)
-		if fn(item) {
-			found = true
-			break
-		}
 	}
+	recursiveContents(result.Metadata.Contents, "")
 	return
+}
+
+// listHelper iterates over all items from the directory
+// and calls the callback for each element.
+func (f *Fs) listHelper(ctx context.Context, dir string, recursive bool, callback func(entries fs.DirEntry) error) (err error) {
+	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
+	if err != nil {
+		return err
+	}
+	var iErr error
+	_, err = f.listAll(ctx, directoryID, false, false, recursive, func(info *api.Item) bool {
+		remote := path.Join(dir, info.Name)
+		if info.IsFolder {
+			// cache the directory ID for later lookups
+			f.dirCache.Put(remote, info.ID)
+			d := fs.NewDir(remote, info.ModTime()).SetID(info.ID)
+			// FIXME more info from dir?
+			iErr = callback(d)
+		} else {
+			o, err := f.newObjectWithInfo(ctx, remote, info)
+			if err != nil {
+				iErr = err
+				return true
+			}
+			iErr = callback(o)
+		}
+		if iErr != nil {
+			return true
+		}
+		return false
+	})
+	if err != nil {
+		return err
+	}
+	if iErr != nil {
+		return iErr
+	}
+	return nil
 }
 
 // List the objects and directories in dir into entries.  The
@@ -494,36 +541,24 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 // This should return ErrDirNotFound if the directory isn't
 // found.
 func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err error) {
-	directoryID, err := f.dirCache.FindDir(ctx, dir, false)
-	if err != nil {
-		return nil, err
-	}
-	var iErr error
-	_, err = f.listAll(ctx, directoryID, false, false, func(info *api.Item) bool {
-		remote := path.Join(dir, info.Name)
-		if info.IsFolder {
-			// cache the directory ID for later lookups
-			f.dirCache.Put(remote, info.ID)
-			d := fs.NewDir(remote, info.ModTime()).SetID(info.ID)
-			// FIXME more info from dir?
-			entries = append(entries, d)
-		} else {
-			o, err := f.newObjectWithInfo(ctx, remote, info)
-			if err != nil {
-				iErr = err
-				return true
-			}
-			entries = append(entries, o)
-		}
-		return false
+	err = f.listHelper(ctx, dir, false, func(o fs.DirEntry) error {
+		entries = append(entries, o)
+		return nil
+	})
+	return entries, err
+}
+
+// ListR lists the objects and directories of the Fs starting
+// from dir recursively into out.
+func (f *Fs) ListR(ctx context.Context, dir string, callback fs.ListRCallback) (err error) {
+	list := walk.NewListRHelper(callback)
+	err = f.listHelper(ctx, dir, true, func(o fs.DirEntry) error {
+		return list.Add(o)
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if iErr != nil {
-		return nil, iErr
-	}
-	return entries, nil
+	return list.Flush()
 }
 
 // Creates from the parameters passed in a half finished Object which
@@ -599,7 +634,7 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "rmdir failed")
+		return fmt.Errorf("rmdir failed: %w", err)
 	}
 	f.dirCache.FlushDir(dir)
 	if err != nil {
@@ -871,7 +906,7 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "about failed")
+		return nil, fmt.Errorf("about failed: %w", err)
 	}
 	usage = &fs.Usage{
 		Total: fs.NewUsageValue(q.Quota),               // quota of bytes that can be used
@@ -888,7 +923,7 @@ func (f *Fs) Hashes() hash.Set {
 	//
 	// https://forum.rclone.org/t/pcloud-to-local-no-hashes-in-common/19440
 	if f.opt.Hostname == "eapi.pcloud.com" {
-		return hash.Set(hash.SHA1)
+		return hash.Set(hash.SHA1 | hash.SHA256)
 	}
 	return hash.Set(hash.MD5 | hash.SHA1)
 }
@@ -937,19 +972,24 @@ func (o *Object) getHashes(ctx context.Context) (err error) {
 
 // Hash returns the SHA-1 of an object returning a lowercase hex string
 func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
-	if t != hash.MD5 && t != hash.SHA1 {
+	var pHash *string
+	switch t {
+	case hash.MD5:
+		pHash = &o.md5
+	case hash.SHA1:
+		pHash = &o.sha1
+	case hash.SHA256:
+		pHash = &o.sha256
+	default:
 		return "", hash.ErrUnsupported
 	}
-	if o.md5 == "" && o.sha1 == "" {
+	if o.md5 == "" && o.sha1 == "" && o.sha256 == "" {
 		err := o.getHashes(ctx)
 		if err != nil {
-			return "", errors.Wrap(err, "failed to get hash")
+			return "", fmt.Errorf("failed to get hash: %w", err)
 		}
 	}
-	if t == hash.MD5 {
-		return o.md5, nil
-	}
-	return o.sha1, nil
+	return *pHash, nil
 }
 
 // Size returns the size of an object in bytes
@@ -965,7 +1005,7 @@ func (o *Object) Size() int64 {
 // setMetaData sets the metadata from info
 func (o *Object) setMetaData(info *api.Item) (err error) {
 	if info.IsFolder {
-		return errors.Wrapf(fs.ErrorNotAFile, "%q is a folder", o.remote)
+		return fmt.Errorf("%q is a folder: %w", o.remote, fs.ErrorNotAFile)
 	}
 	o.hasMetaData = true
 	o.size = info.Size
@@ -978,6 +1018,7 @@ func (o *Object) setMetaData(info *api.Item) (err error) {
 func (o *Object) setHashes(hashes *api.Hashes) {
 	o.sha1 = hashes.SHA1
 	o.md5 = hashes.MD5
+	o.sha256 = hashes.SHA256
 }
 
 // readMetaData gets the metadata if it hasn't already been fetched
@@ -1051,7 +1092,7 @@ func (o *Object) downloadURL(ctx context.Context) (URL string, err error) {
 		return "", err
 	}
 	if !result.IsValid() {
-		return "", errors.Errorf("fetched invalid link %+v", result)
+		return "", fmt.Errorf("fetched invalid link %+v", result)
 	}
 	o.link = &result
 	return o.link.URL(), nil
@@ -1091,6 +1132,10 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	size := src.Size() // NB can upload without size
 	modTime := src.ModTime(ctx)
 	remote := o.Remote()
+
+	if size < 0 {
+		return errors.New("can't upload unknown sizes objects")
+	}
 
 	// Create the directory for the object if it doesn't exist
 	leaf, directoryID, err := o.fs.dirCache.FindPath(ctx, remote, true)
@@ -1135,7 +1180,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	if size == 0 {
 		formReader, contentType, overhead, err := rest.MultipartUpload(ctx, in, opts.Parameters, "content", leaf)
 		if err != nil {
-			return errors.Wrap(err, "failed to make multipart upload for 0 length file")
+			return fmt.Errorf("failed to make multipart upload for 0 length file: %w", err)
 		}
 
 		contentLength := overhead + size
@@ -1154,15 +1199,19 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	})
 	if err != nil {
 		// sometimes pcloud leaves a half complete file on
-		// error, so delete it if it exists
-		delObj, delErr := o.fs.NewObject(ctx, o.remote)
-		if delErr == nil && delObj != nil {
-			_ = delObj.Remove(ctx)
+		// error, so delete it if it exists, trying a few times
+		for i := 0; i < 5; i++ {
+			delObj, delErr := o.fs.NewObject(ctx, o.remote)
+			if delErr == nil && delObj != nil {
+				_ = delObj.Remove(ctx)
+				break
+			}
+			time.Sleep(time.Second)
 		}
 		return err
 	}
 	if len(result.Items) != 1 {
-		return errors.Errorf("failed to upload %v - not sure why", o)
+		return fmt.Errorf("failed to upload %v - not sure why", o)
 	}
 	o.setHashes(&result.Checksums[0])
 	return o.setMetaData(&result.Items[0])

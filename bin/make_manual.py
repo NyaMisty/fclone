@@ -23,6 +23,7 @@ docs = [
     "rc.md",
     "overview.md",
     "flags.md",
+    "docker.md",
 
     # Keep these alphabetical by full name
     "fichier.md",
@@ -42,6 +43,7 @@ docs = [
     "googlecloudstorage.md",
     "drive.md",
     "googlephotos.md",
+    "hasher.md",
     "hdfs.md",
     "http.md",
     "hubic.md",
@@ -54,6 +56,7 @@ docs = [
     "onedrive.md",
     "opendrive.md",
     "qingstor.md",
+    "sia.md",
     "swift.md",
     "pcloud.md",
     "premiumizeme.md",

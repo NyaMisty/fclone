@@ -2,11 +2,12 @@ package fs
 
 import (
 	"context"
+	"errors"
 	"net"
+	"os"
+	"strconv"
 	"strings"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 // Global
@@ -129,6 +130,8 @@ type ConfigInfo struct {
 	FsCacheExpireDuration  time.Duration
 	FsCacheExpireInterval  time.Duration
 	DisableHTTP2           bool
+	HumanReadable          bool
+	KvLockTime             time.Duration // maximum time to keep key-value database locked by process
 }
 
 // NewConfig creates a new config with everything set to the default
@@ -168,6 +171,26 @@ func NewConfig() *ConfigInfo {
 	c.TrackRenamesStrategy = "hash"
 	c.FsCacheExpireDuration = 300 * time.Second
 	c.FsCacheExpireInterval = 60 * time.Second
+	c.KvLockTime = 1 * time.Second
+
+	// Perform a simple check for debug flags to enable debug logging during the flag initialization
+	for argIndex, arg := range os.Args {
+		if strings.HasPrefix(arg, "-vv") && strings.TrimRight(arg, "v") == "-" {
+			c.LogLevel = LogLevelDebug
+		}
+		if arg == "--log-level=DEBUG" || (arg == "--log-level" && len(os.Args) > argIndex+1 && os.Args[argIndex+1] == "DEBUG") {
+			c.LogLevel = LogLevelDebug
+		}
+		if strings.HasPrefix(arg, "--verbose=") {
+			if level, err := strconv.Atoi(arg[10:]); err == nil && level >= 2 {
+				c.LogLevel = LogLevelDebug
+			}
+		}
+	}
+	envValue, found := os.LookupEnv("RCLONE_LOG_LEVEL")
+	if found && envValue == "DEBUG" {
+		c.LogLevel = LogLevelDebug
+	}
 
 	return c
 }
@@ -221,11 +244,11 @@ func AddConfig(ctx context.Context) (context.Context, *ConfigInfo) {
 	return newCtx, cCopy
 }
 
-// ConfigToEnv converts a config section and name, e.g. ("myremote",
+// ConfigToEnv converts a config section and name, e.g. ("my-remote",
 // "ignore-size") into an environment name
-// "RCLONE_CONFIG_MYREMOTE_IGNORE_SIZE"
+// "RCLONE_CONFIG_MY-REMOTE_IGNORE_SIZE"
 func ConfigToEnv(section, name string) string {
-	return "RCLONE_CONFIG_" + strings.ToUpper(strings.Replace(section+"_"+name, "-", "_", -1))
+	return "RCLONE_CONFIG_" + strings.ToUpper(section+"_"+strings.Replace(name, "-", "_", -1))
 }
 
 // OptionToEnv converts an option name, e.g. "ignore-size" into an

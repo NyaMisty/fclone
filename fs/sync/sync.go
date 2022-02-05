@@ -3,6 +3,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/rclone/rclone/backend/drive"
 	"path"
@@ -11,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/filter"
@@ -359,6 +359,8 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.W
 					// Delete src if no error on copy
 					if operations.SameObject(src, pair.Dst) {
 						fs.Logf(src, "Not removing source file as it is the same file as the destination")
+					} else if s.ci.IgnoreExisting {
+						fs.Debugf(src, "Not removing source file as destination file exists and --ignore-existing is set")
 					} else {
 						s.processError(operations.DeleteFile(s.ctx, src))
 					}
@@ -671,9 +673,7 @@ func (s *syncCopyMove) srcParentDirCheck(entry fs.DirEntry) {
 	if parentDir == "." {
 		parentDir = ""
 	}
-	if _, ok := s.srcEmptyDirs[parentDir]; ok {
-		delete(s.srcEmptyDirs, parentDir)
-	}
+	delete(s.srcEmptyDirs, parentDir)
 }
 
 // parseTrackRenamesStrategy turns a config string into a trackRenamesStrategy
@@ -692,7 +692,7 @@ func parseTrackRenamesStrategy(strategies string) (strategy trackRenamesStrategy
 		case "size":
 			// ignore
 		default:
-			return strategy, errors.Errorf("unknown track renames strategy %q", s)
+			return strategy, fmt.Errorf("unknown track renames strategy %q", s)
 		}
 	}
 	return strategy, nil

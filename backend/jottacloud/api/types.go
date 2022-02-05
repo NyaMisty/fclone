@@ -2,10 +2,9 @@ package api
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"time"
-
-	"github.com/pkg/errors"
 )
 
 const (
@@ -368,6 +367,7 @@ type JottaFile struct {
 	XMLName         xml.Name
 	Name            string `xml:"name,attr"`
 	Deleted         Flag   `xml:"deleted,attr"`
+	PublicURI       string `xml:"publicURI"`
 	PublicSharePath string `xml:"publicSharePath"`
 	State           string `xml:"currentRevision>state"`
 	CreatedAt       Time   `xml:"currentRevision>created"`

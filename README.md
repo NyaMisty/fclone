@@ -1,8 +1,9 @@
-[<img src="https://rclone.org/img/logo_on_light__horizontal_color.svg" width="50%" alt="rclone logo">](https://rclone.org/)
+[<img src="https://rclone.org/img/logo_on_light__horizontal_color.svg" width="50%" alt="rclone logo">](https://rclone.org/#gh-light-mode-only)
+[<img src="https://rclone.org/img/logo_on_dark__horizontal_color.svg" width="50%" alt="rclone logo">](https://rclone.org/#gh-dark-mode-only)
 
 [Website](https://rclone.org) |
 [Documentation](https://rclone.org/docs/) |
-[Download](https://rclone.org/downloads/) | 
+[Download](https://rclone.org/downloads/) |
 [Contributing](CONTRIBUTING.md) |
 [Changelog](https://rclone.org/changelog/) |
 [Installation](https://rclone.org/install/) |
@@ -10,7 +11,7 @@
 
 [![Build Status](https://github.com/rclone/rclone/workflows/build/badge.svg)](https://github.com/rclone/rclone/actions?query=workflow%3Abuild)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rclone/rclone)](https://goreportcard.com/report/github.com/rclone/rclone)
-[![GoDoc](https://godoc.org/github.com/rclone/rclone?status.svg)](https://godoc.org/github.com/rclone/rclone) 
+[![GoDoc](https://godoc.org/github.com/rclone/rclone?status.svg)](https://godoc.org/github.com/rclone/rclone)
 [![Docker Pulls](https://img.shields.io/docker/pulls/rclone/rclone)](https://hub.docker.com/r/rclone/rclone)
 
 # Download latest build
@@ -19,7 +20,7 @@ https://nightly.link/NyaMisty/fclone/workflows/build/master?status=completed
 
 # Rclone
 
-Rclone *("rsync for cloud storage")* is a command line program to sync files and directories to and from different cloud storage providers.
+Rclone *("rsync for cloud storage")* is a command-line program to sync files and directories to and from different cloud storage providers.
 
 ## Storage providers
 
@@ -36,7 +37,6 @@ Rclone *("rsync for cloud storage")* is a command line program to sync files and
   * Dropbox [:page_facing_up:](https://rclone.org/dropbox/)
   * Enterprise File Fabric [:page_facing_up:](https://rclone.org/filefabric/)
   * FTP [:page_facing_up:](https://rclone.org/ftp/)
-  * GetSky [:page_facing_up:](https://rclone.org/jottacloud/)
   * Google Cloud Storage [:page_facing_up:](https://rclone.org/googlecloudstorage/)
   * Google Drive [:page_facing_up:](https://rclone.org/drive/)
   * Google Photos [:page_facing_up:](https://rclone.org/googlephotos/)
@@ -64,8 +64,10 @@ Rclone *("rsync for cloud storage")* is a command line program to sync files and
   * put.io [:page_facing_up:](https://rclone.org/putio/)
   * QingStor [:page_facing_up:](https://rclone.org/qingstor/)
   * Rackspace Cloud Files [:page_facing_up:](https://rclone.org/swift/)
+  * RackCorp Object Storage [:page_facing_up:](https://rclone.org/s3/#RackCorp)
   * Scaleway [:page_facing_up:](https://rclone.org/s3/#scaleway)
   * Seafile [:page_facing_up:](https://rclone.org/seafile/)
+  * SeaweedFS [:page_facing_up:](https://rclone.org/s3/#seaweedfs)
   * SFTP [:page_facing_up:](https://rclone.org/sftp/)
   * StackPath [:page_facing_up:](https://rclone.org/s3/#stackpath)
   * SugarSync [:page_facing_up:](https://rclone.org/sugarsync/)
@@ -76,7 +78,7 @@ Rclone *("rsync for cloud storage")* is a command line program to sync files and
   * Yandex Disk [:page_facing_up:](https://rclone.org/yandex/)
   * Zoho WorkDrive [:page_facing_up:](https://rclone.org/zoho/)
   * The local filesystem [:page_facing_up:](https://rclone.org/local/)
-  
+
 Please see [the full list of all storage providers and their features](https://rclone.org/overview/)
 
 ## Features
@@ -91,7 +93,6 @@ Please see [the full list of all storage providers and their features](https://r
   * Optional large file chunking ([Chunker](https://rclone.org/chunker/))
   * Optional transparent compression ([Compress](https://rclone.org/compress/))
   * Optional encryption ([Crypt](https://rclone.org/crypt/))
-  * Optional cache ([Cache](https://rclone.org/cache/))
   * Optional FUSE mount ([rclone mount](https://rclone.org/commands/rclone_mount/))
   * Multi-threaded downloads to local disk
   * Can [serve](https://rclone.org/commands/rclone_serve/) local or remote files over HTTP/WebDav/FTP/SFTP/dlna

@@ -20,6 +20,8 @@
 package main
 
 /*
+#include <stdlib.h>
+
 struct RcloneRPCResult {
 	char*	Output;
 	int	Status;
@@ -28,10 +30,17 @@ struct RcloneRPCResult {
 import "C"
 
 import (
+	"unsafe"
+
 	"github.com/rclone/rclone/librclone/librclone"
 
-	_ "github.com/rclone/rclone/backend/all" // import all backends
-	_ "github.com/rclone/rclone/lib/plugin"  // import plugins
+	_ "github.com/rclone/rclone/backend/all"   // import all backends
+	_ "github.com/rclone/rclone/fs/operations" // import operations/* rc commands
+	_ "github.com/rclone/rclone/fs/sync"       // import sync/*
+	_ "github.com/rclone/rclone/lib/plugin"    // import plugins
+	_ "github.com/rclone/rclone/cmd/mount"     // import mount
+	_ "github.com/rclone/rclone/cmd/mount2"    // import mount2
+	_ "github.com/rclone/rclone/cmd/cmount"    // import cmount
 )
 
 // RcloneInitialize initializes rclone as a library
@@ -62,12 +71,14 @@ type RcloneRPCResult struct { //nolint:deadcode
 // to the rclone API as described in https://rclone.org/rc/
 //
 //   method is a string, eg "operations/list"
-//   input should be a serialized JSON object
-//   result.Output will be returned as a serialized JSON object
+//   input should be a string with a serialized JSON object
+//   result.Output will be returned as a string with a serialized JSON object
 //   result.Status is a HTTP status return (200=OK anything else fail)
 //
-// Caller is responsible for freeing the memory for result.Output,
-// result itself is passed on the stack.
+// All strings are UTF-8 encoded, on all platforms.
+//
+// Caller is responsible for freeing the memory for result.Output
+// (see RcloneFreeString), result itself is passed on the stack.
 //
 //export RcloneRPC
 func RcloneRPC(method *C.char, input *C.char) (result C.struct_RcloneRPCResult) { //nolint:golint
@@ -75,6 +86,18 @@ func RcloneRPC(method *C.char, input *C.char) (result C.struct_RcloneRPCResult) 
 	result.Output = C.CString(output)
 	result.Status = C.int(status)
 	return result
+}
+
+// RcloneFreeString may be used to free the string returned by RcloneRPC
+//
+// If the caller has access to the C standard library, the free function can
+// normally be called directly instead. In some cases the caller uses a
+// runtime library which is not compatible, and then this function can be
+// used to release the memory with the same library that allocated it.
+//
+//export RcloneFreeString
+func RcloneFreeString(str *C.char) {
+	C.free(unsafe.Pointer(str))
 }
 
 // do nothing here - necessary for building into a C library

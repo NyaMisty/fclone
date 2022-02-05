@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,7 +24,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/backend/webdav/api"
 	"github.com/rclone/rclone/backend/webdav/odrvcookie"
 	"github.com/rclone/rclone/fs"
@@ -70,15 +70,11 @@ func init() {
 		NewFs:       NewFs,
 		Options: []fs.Option{{
 			Name:     "url",
-			Help:     "URL of http host to connect to",
+			Help:     "URL of http host to connect to.\n\nE.g. https://example.com.",
 			Required: true,
-			Examples: []fs.OptionExample{{
-				Value: "https://example.com",
-				Help:  "Connect to example.com",
-			}},
 		}, {
 			Name: "vendor",
-			Help: "Name of the Webdav site/service/software you are using",
+			Help: "Name of the Webdav site/service/software you are using.",
 			Examples: []fs.OptionExample{{
 				Value: "nextcloud",
 				Help:  "Nextcloud",
@@ -87,27 +83,27 @@ func init() {
 				Help:  "Owncloud",
 			}, {
 				Value: "sharepoint",
-				Help:  "Sharepoint Online, authenticated by Microsoft account.",
+				Help:  "Sharepoint Online, authenticated by Microsoft account",
 			}, {
 				Value: "sharepoint-ntlm",
-				Help:  "Sharepoint with NTLM authentication. Usually self-hosted or on-premises.",
+				Help:  "Sharepoint with NTLM authentication, usually self-hosted or on-premises",
 			}, {
 				Value: "other",
 				Help:  "Other site/service or software",
 			}},
 		}, {
 			Name: "user",
-			Help: "User name. In case NTLM authentication is used, the username should be in the format 'Domain\\User'.",
+			Help: "User name.\n\nIn case NTLM authentication is used, the username should be in the format 'Domain\\User'.",
 		}, {
 			Name:       "pass",
 			Help:       "Password.",
 			IsPassword: true,
 		}, {
 			Name: "bearer_token",
-			Help: "Bearer token instead of user/pass (e.g. a Macaroon)",
+			Help: "Bearer token instead of user/pass (e.g. a Macaroon).",
 		}, {
 			Name:     "bearer_token_command",
-			Help:     "Command to run to get a bearer token",
+			Help:     "Command to run to get a bearer token.",
 			Advanced: true,
 		}, {
 			Name:     config.ConfigEncoding,
@@ -115,14 +111,14 @@ func init() {
 			Advanced: true,
 		}, {
 			Name: "headers",
-			Help: `Set HTTP headers for all transactions
+			Help: `Set HTTP headers for all transactions.
 
 Use this to set additional HTTP headers for all transactions
 
 The input format is comma separated list of key,value pairs.  Standard
 [CSV encoding](https://godoc.org/encoding/csv) may be used.
 
-For example to set a Cookie use 'Cookie,name=value', or '"Cookie","name=value"'.
+For example, to set a Cookie use 'Cookie,name=value', or '"Cookie","name=value"'.
 
 You can set multiple headers, e.g. '"Cookie","name=value","Authorization","xxx"'.
 `,
@@ -307,7 +303,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, depth string)
 		}
 	}
 	if err != nil {
-		return nil, errors.Wrap(err, "read metadata failed")
+		return nil, fmt.Errorf("read metadata failed: %w", err)
 	}
 	if len(result.Responses) < 1 {
 		return nil, fs.ErrorObjectNotFound
@@ -317,7 +313,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, depth string)
 		return nil, fs.ErrorObjectNotFound
 	}
 	if itemIsDir(&item) {
-		return nil, fs.ErrorNotAFile
+		return nil, fs.ErrorIsDir
 	}
 	return &item.Props, nil
 }
@@ -326,7 +322,7 @@ func (f *Fs) readMetaDataForPath(ctx context.Context, path string, depth string)
 func errorHandler(resp *http.Response) error {
 	body, err := rest.ReadBody(resp)
 	if err != nil {
-		return errors.Wrap(err, "error when trying to read error from body")
+		return fmt.Errorf("error when trying to read error from body: %w", err)
 	}
 	// Decode error response
 	errResponse := new(api.Error)
@@ -391,7 +387,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		var err error
 		opt.Pass, err = obscure.Reveal(opt.Pass)
 		if err != nil {
-			return nil, errors.Wrap(err, "couldn't decrypt password")
+			return nil, fmt.Errorf("couldn't decrypt password: %w", err)
 		}
 	}
 	if opt.Vendor == "" {
@@ -469,7 +465,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		}
 		_, err := f.NewObject(ctx, remote)
 		if err != nil {
-			if errors.Cause(err) == fs.ErrorObjectNotFound || errors.Cause(err) == fs.ErrorNotAFile {
+			if errors.Is(err, fs.ErrorObjectNotFound) || errors.Is(err, fs.ErrorIsDir) {
 				// File doesn't exist so return old f
 				f.root = root
 				return f, nil
@@ -507,7 +503,7 @@ func (f *Fs) fetchBearerToken(cmd string) (string, error) {
 		if stderrString == "" {
 			stderrString = stdoutString
 		}
-		return "", errors.Wrapf(err, "failed to get bearer token using %q: %s", f.opt.BearerTokenCommand, stderrString)
+		return "", fmt.Errorf("failed to get bearer token using %q: %s: %w", f.opt.BearerTokenCommand, stderrString, err)
 	}
 	return stdoutString, nil
 }
@@ -677,12 +673,12 @@ func (f *Fs) listAll(ctx context.Context, dir string, directoriesOnly bool, file
 				return found, fs.ErrorDirNotFound
 			}
 		}
-		return found, errors.Wrap(err, "couldn't list files")
+		return found, fmt.Errorf("couldn't list files: %w", err)
 	}
 	//fmt.Printf("result = %#v", &result)
 	baseURL, err := rest.URLJoin(f.endpoint, opts.Path)
 	if err != nil {
-		return false, errors.Wrap(err, "couldn't join URL")
+		return false, fmt.Errorf("couldn't join URL: %w", err)
 	}
 	for i := range result.Responses {
 		item := &result.Responses[i]
@@ -951,7 +947,7 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "rmdir failed")
+		return fmt.Errorf("rmdir failed: %w", err)
 	}
 	// FIXME parse Multistatus response
 	return nil
@@ -990,11 +986,11 @@ func (f *Fs) copyOrMove(ctx context.Context, src fs.Object, remote string, metho
 	dstPath := f.filePath(remote)
 	err := f.mkParentDir(ctx, dstPath)
 	if err != nil {
-		return nil, errors.Wrap(err, "Copy mkParentDir failed")
+		return nil, fmt.Errorf("Copy mkParentDir failed: %w", err)
 	}
 	destinationURL, err := rest.URLJoin(f.endpoint, dstPath)
 	if err != nil {
-		return nil, errors.Wrap(err, "copyOrMove couldn't join URL")
+		return nil, fmt.Errorf("copyOrMove couldn't join URL: %w", err)
 	}
 	var resp *http.Response
 	opts := rest.Opts{
@@ -1014,11 +1010,11 @@ func (f *Fs) copyOrMove(ctx context.Context, src fs.Object, remote string, metho
 		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "Copy call failed")
+		return nil, fmt.Errorf("Copy call failed: %w", err)
 	}
 	dstObj, err := f.NewObject(ctx, remote)
 	if err != nil {
-		return nil, errors.Wrap(err, "Copy NewObject failed")
+		return nil, fmt.Errorf("Copy NewObject failed: %w", err)
 	}
 	return dstObj, nil
 }
@@ -1081,18 +1077,18 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		return fs.ErrorDirExists
 	}
 	if err != fs.ErrorDirNotFound {
-		return errors.Wrap(err, "DirMove dirExists dst failed")
+		return fmt.Errorf("DirMove dirExists dst failed: %w", err)
 	}
 
 	// Make sure the parent directory exists
 	err = f.mkParentDir(ctx, dstPath)
 	if err != nil {
-		return errors.Wrap(err, "DirMove mkParentDir dst failed")
+		return fmt.Errorf("DirMove mkParentDir dst failed: %w", err)
 	}
 
 	destinationURL, err := rest.URLJoin(f.endpoint, dstPath)
 	if err != nil {
-		return errors.Wrap(err, "DirMove couldn't join URL")
+		return fmt.Errorf("DirMove couldn't join URL: %w", err)
 	}
 
 	var resp *http.Response
@@ -1110,7 +1106,7 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return errors.Wrap(err, "DirMove MOVE call failed")
+		return fmt.Errorf("DirMove MOVE call failed: %w", err)
 	}
 	return nil
 }
@@ -1152,7 +1148,7 @@ func (f *Fs) About(ctx context.Context) (*fs.Usage, error) {
 		return f.shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "about call failed")
+		return nil, fmt.Errorf("about call failed: %w", err)
 	}
 	usage := &fs.Usage{}
 	if i, err := strconv.ParseInt(q.Used, 10, 64); err == nil && i >= 0 {
@@ -1293,7 +1289,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	err = o.fs.mkParentDir(ctx, o.filePath())
 	if err != nil {
-		return errors.Wrap(err, "Update mkParentDir failed")
+		return fmt.Errorf("Update mkParentDir failed: %w", err)
 	}
 
 	size := src.Size()

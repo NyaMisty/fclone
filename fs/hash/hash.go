@@ -3,7 +3,10 @@ package hash
 import (
 	"crypto/md5"
 	"crypto/sha1"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"hash/crc32"
@@ -11,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/jzelinskie/whirlpool"
-	"github.com/pkg/errors"
 )
 
 // Type indicates a standard hashing algorithm
@@ -71,6 +73,9 @@ var (
 
 	// CRC32 indicates CRC-32 support
 	CRC32 Type
+
+	// SHA256 indicates SHA-256 support
+	SHA256 Type
 )
 
 func init() {
@@ -78,6 +83,7 @@ func init() {
 	SHA1 = RegisterHash("sha1", "SHA-1", 40, sha1.New)
 	Whirlpool = RegisterHash("whirlpool", "Whirlpool", 128, whirlpool.New)
 	CRC32 = RegisterHash("crc32", "CRC-32", 8, func() hash.Hash { return crc32.NewIEEE() })
+	SHA256 = RegisterHash("sha256", "SHA-256", 64, sha256.New)
 }
 
 // Supported returns a set of all the supported hashes by
@@ -87,8 +93,11 @@ func Supported() Set {
 }
 
 // Width returns the width in characters for any HashType
-func Width(hashType Type) int {
+func Width(hashType Type, base64Encoded bool) int {
 	if hash := type2hash[hashType]; hash != nil {
+		if base64Encoded {
+			return base64.URLEncoding.EncodedLen(hash.width / 2)
+		}
 		return hash.width
 	}
 	return 0
@@ -144,7 +153,7 @@ func (h *Type) Set(s string) error {
 		*h = hash.hashType
 		return nil
 	}
-	return errors.Errorf("Unknown hash type %q", s)
+	return fmt.Errorf("Unknown hash type %q", s)
 }
 
 // Type of the value
@@ -157,7 +166,7 @@ func (h Type) Type() string {
 // and this function must support all types.
 func fromTypes(set Set) (map[Type]hash.Hash, error) {
 	if !set.SubsetOf(Supported()) {
-		return nil, errors.Errorf("requested set %08x contains unknown hash types", int(set))
+		return nil, fmt.Errorf("requested set %08x contains unknown hash types", int(set))
 	}
 	hashers := map[Type]hash.Hash{}
 
@@ -236,6 +245,18 @@ func (m *MultiHasher) Sum(hashType Type) ([]byte, error) {
 		return nil, ErrUnsupported
 	}
 	return h.Sum(nil), nil
+}
+
+// SumString returns the specified hash from the multihasher as a hex or base64 encoded string
+func (m *MultiHasher) SumString(hashType Type, base64Encoded bool) (string, error) {
+	sum, err := m.Sum(hashType)
+	if err != nil {
+		return "", err
+	}
+	if base64Encoded {
+		return base64.URLEncoding.EncodeToString(sum), nil
+	}
+	return hex.EncodeToString(sum), nil
 }
 
 // Size returns the number of bytes written
@@ -340,4 +361,16 @@ func Equals(src, dst string) bool {
 		return true
 	}
 	return src == dst
+}
+
+// HelpString returns help message with supported hashes
+func HelpString(indent int) string {
+	padding := strings.Repeat(" ", indent)
+	var help strings.Builder
+	help.WriteString(padding)
+	help.WriteString("Supported hashes are:\n")
+	for _, h := range supported {
+		fmt.Fprintf(&help, "%s  * %v\n", padding, h.String())
+	}
+	return help.String()
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
 	"github.com/rclone/rclone/backend/onedrive/api"
 	"github.com/rclone/rclone/backend/onedrive/quickxorhash"
 	"github.com/rclone/rclone/fs"
@@ -65,9 +65,12 @@ var (
 	authPath  = "/common/oauth2/v2.0/authorize"
 	tokenPath = "/common/oauth2/v2.0/token"
 
+	scopesWithSitePermission    = []string{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "offline_access", "Sites.Read.All"}
+	scopesWithoutSitePermission = []string{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "offline_access"}
+
 	// Description of how to auth for this app for a business account
 	oauthConfig = &oauth2.Config{
-		Scopes:       []string{"Files.Read", "Files.ReadWrite", "Files.Read.All", "Files.ReadWrite.All", "offline_access", "Sites.Read.All"},
+		Scopes:       scopesWithSitePermission,
 		ClientID:     rcloneClientID,
 		ClientSecret: obscure.MustReveal(rcloneEncryptedClientSecret),
 		RedirectURL:  oauthutil.RedirectLocalhostURL,
@@ -129,19 +132,30 @@ Note that the chunks will be buffered into memory.`,
 			Advanced: true,
 		}, {
 			Name:     "drive_id",
-			Help:     "The ID of the drive to use",
+			Help:     "The ID of the drive to use.",
 			Default:  "",
 			Advanced: true,
 		}, {
 			Name:     "drive_type",
-			Help:     "The type of the drive ( " + driveTypePersonal + " | " + driveTypeBusiness + " | " + driveTypeSharepoint + " )",
+			Help:     "The type of the drive (" + driveTypePersonal + " | " + driveTypeBusiness + " | " + driveTypeSharepoint + ").",
 			Default:  "",
+			Advanced: true,
+		}, {
+			Name: "disable_site_permission",
+			Help: `Disable the request for Sites.Read.All permission.
+
+If set to true, you will no longer be able to search for a SharePoint site when
+configuring drive ID, because rclone will not request Sites.Read.All permission.
+Set it to true if your organization didn't assign Sites.Read.All permission to the
+application, and your organization disallows users to consent app permission
+request on their own.`,
+			Default:  false,
 			Advanced: true,
 		}, {
 			Name: "expose_onenote_files",
 			Help: `Set to make OneNote files show up in directory listings.
 
-By default rclone will hide OneNote files in directory listings because
+By default, rclone will hide OneNote files in directory listings because
 operations like "Open" and "Update" won't work on them.  But this
 behaviour may also prevent you from deleting them.  If you want to
 delete OneNote files or otherwise want them to show up in directory
@@ -165,7 +179,7 @@ fall back to normal copy (which will be slightly slower).`,
 		}, {
 			Name:    "no_versions",
 			Default: false,
-			Help: `Remove all versions on modifying operations
+			Help: `Remove all versions on modifying operations.
 
 Onedrive for business creates versions when rclone uploads new files
 overwriting an existing one and when it sets the modification time.
@@ -186,10 +200,10 @@ this flag there.
 			Advanced: true,
 			Examples: []fs.OptionExample{{
 				Value: "anonymous",
-				Help:  "Anyone with the link has access, without needing to sign in. This may include people outside of your organization. Anonymous link support may be disabled by an administrator.",
+				Help:  "Anyone with the link has access, without needing to sign in.\nThis may include people outside of your organization.\nAnonymous link support may be disabled by an administrator.",
 			}, {
 				Value: "organization",
-				Help:  "Anyone signed into your organization (tenant) can use the link to get access. Only available in OneDrive for Business and SharePoint.",
+				Help:  "Anyone signed into your organization (tenant) can use the link to get access.\nOnly available in OneDrive for Business and SharePoint.",
 			}},
 		}, {
 			Name:     "link_type",
@@ -374,6 +388,12 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 	region, graphURL := getRegionURL(m)
 
 	if config.State == "" {
+		disableSitePermission, _ := m.Get("disable_site_permission")
+		if disableSitePermission == "true" {
+			oauthConfig.Scopes = scopesWithoutSitePermission
+		} else {
+			oauthConfig.Scopes = scopesWithSitePermission
+		}
 		oauthConfig.Endpoint = oauth2.Endpoint{
 			AuthURL:  authEndpoint[region] + authPath,
 			TokenURL: authEndpoint[region] + tokenPath,
@@ -385,7 +405,7 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 
 	oAuthClient, _, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure OneDrive")
+		return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
 	}
 	srv := rest.NewClient(oAuthClient)
 
@@ -399,7 +419,7 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 			Help:  "Root Sharepoint site",
 		}, {
 			Value: "url",
-			Help:  "Sharepoint site name or URL (e.g. mysite or https://contoso.sharepoint.com/sites/mysite)",
+			Help:  "Sharepoint site name or URL\nE.g. mysite or https://contoso.sharepoint.com/sites/mysite",
 		}, {
 			Value: "search",
 			Help:  "Search for a Sharepoint site",
@@ -411,7 +431,7 @@ func Config(ctx context.Context, name string, m configmap.Mapper, config fs.Conf
 			Help:  "Type in SiteID (advanced)",
 		}, {
 			Value: "path",
-			Help:  "Sharepoint server-relative path (advanced, e.g. /teams/hr)",
+			Help:  "Sharepoint server-relative path (advanced)\nE.g. /teams/hr",
 		}})
 	case "choose_type_done":
 		// Jump to next state according to config chosen
@@ -527,6 +547,7 @@ type Options struct {
 	ChunkSize               fs.SizeSuffix        `config:"chunk_size"`
 	DriveID                 string               `config:"drive_id"`
 	DriveType               string               `config:"drive_type"`
+	DisableSitePermission   bool                 `config:"disable_site_permission"`
 	ExposeOneNoteFiles      bool                 `config:"expose_onenote_files"`
 	ServerSideAcrossConfigs bool                 `config:"server_side_across_configs"`
 	ListChunk               int64                `config:"list_chunk"`
@@ -754,10 +775,10 @@ func errorHandler(resp *http.Response) error {
 func checkUploadChunkSize(cs fs.SizeSuffix) error {
 	const minChunkSize = fs.SizeSuffixBase
 	if cs%chunkSizeMultiple != 0 {
-		return errors.Errorf("%s is not a multiple of %s", cs, chunkSizeMultiple)
+		return fmt.Errorf("%s is not a multiple of %s", cs, chunkSizeMultiple)
 	}
 	if cs < minChunkSize {
-		return errors.Errorf("%s is less than %s", cs, minChunkSize)
+		return fmt.Errorf("%s is less than %s", cs, minChunkSize)
 	}
 	return nil
 }
@@ -781,7 +802,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 	err = checkUploadChunkSize(opt.ChunkSize)
 	if err != nil {
-		return nil, errors.Wrap(err, "onedrive: chunk size")
+		return nil, fmt.Errorf("onedrive: chunk size: %w", err)
 	}
 
 	if opt.DriveID == "" || opt.DriveType == "" {
@@ -789,6 +810,11 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	rootURL := graphAPIEndpoint[opt.Region] + "/v1.0" + "/drives/" + opt.DriveID
+	if opt.DisableSitePermission {
+		oauthConfig.Scopes = scopesWithoutSitePermission
+	} else {
+		oauthConfig.Scopes = scopesWithSitePermission
+	}
 	oauthConfig.Endpoint = oauth2.Endpoint{
 		AuthURL:  authEndpoint[opt.Region] + authPath,
 		TokenURL: authEndpoint[opt.Region] + tokenPath,
@@ -797,7 +823,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	root = parsePath(root)
 	oAuthClient, ts, err := oauthutil.NewClient(ctx, name, m, oauthConfig)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to configure OneDrive")
+		return nil, fmt.Errorf("failed to configure OneDrive: %w", err)
 	}
 
 	ci := fs.GetConfig(ctx)
@@ -827,8 +853,11 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 	// Get rootID
 	rootInfo, _, err := f.readMetaDataForPath(ctx, "")
-	if err != nil || rootInfo.GetID() == "" {
-		return nil, errors.Wrap(err, "failed to get root")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get root: %w", err)
+	}
+	if rootInfo.GetID() == "" {
+		return nil, errors.New("failed to get root: ID was empty")
 	}
 
 	f.dirCache = dircache.New(root, rootInfo.GetID(), f)
@@ -971,7 +1000,7 @@ OUTER:
 			return shouldRetry(ctx, resp, err)
 		})
 		if err != nil {
-			return found, errors.Wrap(err, "couldn't list files")
+			return found, fmt.Errorf("couldn't list files: %w", err)
 		}
 		if len(result.Value) == 0 {
 			break
@@ -1175,7 +1204,7 @@ func (f *Fs) waitForJob(ctx context.Context, location string, o *Object) error {
 		var status api.AsyncOperationStatus
 		err = json.Unmarshal(body, &status)
 		if err != nil {
-			return errors.Wrapf(err, "async status result not JSON: %q", body)
+			return fmt.Errorf("async status result not JSON: %q: %w", body, err)
 		}
 
 		switch status.Status {
@@ -1185,15 +1214,18 @@ func (f *Fs) waitForJob(ctx context.Context, location string, o *Object) error {
 			}
 			fallthrough
 		case "deleteFailed":
-			return errors.Errorf("%s: async operation returned %q", o.remote, status.Status)
+			return fmt.Errorf("%s: async operation returned %q", o.remote, status.Status)
 		case "completed":
 			err = o.readMetaData(ctx)
-			return errors.Wrapf(err, "async operation completed but readMetaData failed")
+			if err != nil {
+				return fmt.Errorf("async operation completed but readMetaData failed: %w", err)
+			}
+			return nil
 		}
 
 		time.Sleep(1 * time.Second)
 	}
-	return errors.Errorf("async operation didn't complete after %v", f.ci.TimeoutOrInfinite())
+	return fmt.Errorf("async operation didn't complete after %v", f.ci.TimeoutOrInfinite())
 }
 
 // Copy src to this remote using server-side copy operations.
@@ -1232,7 +1264,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		srcPath := srcObj.rootPath()
 		dstPath := f.rootPath(remote)
 		if strings.ToLower(srcPath) == strings.ToLower(dstPath) {
-			return nil, errors.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
+			return nil, fmt.Errorf("can't copy %q -> %q as are same name when lowercase", srcPath, dstPath)
 		}
 	}
 
@@ -1450,7 +1482,7 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return nil, errors.Wrap(err, "about failed")
+		return nil, fmt.Errorf("about failed: %w", err)
 	}
 	q := drive.Quota
 	// On (some?) Onedrive sharepoints these are all 0 so return unknown in that case
@@ -1500,10 +1532,85 @@ func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, 
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		fmt.Println(err)
+		if resp != nil && resp.StatusCode == 400 && f.driveType != driveTypePersonal {
+			return "", fmt.Errorf("%v (is making public links permitted by the org admin?)", err)
+		}
 		return "", err
 	}
-	return result.Link.WebURL, nil
+
+	shareURL := result.Link.WebURL
+
+	// Convert share link to direct download link if target is not a folder
+	// Not attempting to do the conversion for regional versions, just to be safe
+	if f.opt.Region != regionGlobal {
+		return shareURL, nil
+	}
+	if info.Folder != nil {
+		fs.Debugf(nil, "Can't convert share link for folder to direct link - returning the link as is")
+		return shareURL, nil
+	}
+
+	cnvFailMsg := "Don't know how to convert share link to direct link - returning the link as is"
+	directURL := ""
+	segments := strings.Split(shareURL, "/")
+	switch f.driveType {
+	case driveTypePersonal:
+		// Method: https://stackoverflow.com/questions/37951114/direct-download-link-to-onedrive-file
+		if len(segments) != 5 {
+			fs.Logf(f, cnvFailMsg)
+			return shareURL, nil
+		}
+		enc := base64.StdEncoding.EncodeToString([]byte(shareURL))
+		enc = strings.ReplaceAll(enc, "/", "_")
+		enc = strings.ReplaceAll(enc, "+", "-")
+		enc = strings.ReplaceAll(enc, "=", "")
+		directURL = fmt.Sprintf("https://api.onedrive.com/v1.0/shares/u!%s/root/content", enc)
+	case driveTypeBusiness:
+		// Method: https://docs.microsoft.com/en-us/sharepoint/dev/spfx/shorter-share-link-format
+		// Example:
+		//   https://{tenant}-my.sharepoint.com/:t:/g/personal/{user_email}/{Opaque_String}
+		//   --convert to->
+		//   https://{tenant}-my.sharepoint.com/personal/{user_email}/_layouts/15/download.aspx?share={Opaque_String}
+		if len(segments) != 8 {
+			fs.Logf(f, cnvFailMsg)
+			return shareURL, nil
+		}
+		directURL = fmt.Sprintf("https://%s/%s/%s/_layouts/15/download.aspx?share=%s",
+			segments[2], segments[5], segments[6], segments[7])
+	case driveTypeSharepoint:
+		// Method: Similar to driveTypeBusiness
+		// Example:
+		//   https://{tenant}.sharepoint.com/:t:/s/{site_name}/{Opaque_String}
+		//   --convert to->
+		//   https://{tenant}.sharepoint.com/sites/{site_name}/_layouts/15/download.aspx?share={Opaque_String}
+		//
+		//   https://{tenant}.sharepoint.com/:t:/t/{team_name}/{Opaque_String}
+		//   --convert to->
+		//   https://{tenant}.sharepoint.com/teams/{team_name}/_layouts/15/download.aspx?share={Opaque_String}
+		//
+		//   https://{tenant}.sharepoint.com/:t:/g/{Opaque_String}
+		//   --convert to->
+		//   https://{tenant}.sharepoint.com/_layouts/15/download.aspx?share={Opaque_String}
+		if len(segments) < 6 || len(segments) > 7 {
+			fs.Logf(f, cnvFailMsg)
+			return shareURL, nil
+		}
+		pathPrefix := ""
+		switch segments[4] {
+		case "s": // Site
+			pathPrefix = "/sites/" + segments[5]
+		case "t": // Team
+			pathPrefix = "/teams/" + segments[5]
+		case "g": // Root site
+		default:
+			fs.Logf(f, cnvFailMsg)
+			return shareURL, nil
+		}
+		directURL = fmt.Sprintf("https://%s%s/_layouts/15/download.aspx?share=%s",
+			segments[2], pathPrefix, segments[len(segments)-1])
+	}
+
+	return directURL, nil
 }
 
 // CleanUp deletes all the hidden files.
@@ -1640,7 +1747,7 @@ func (o *Object) Size() int64 {
 // setMetaData sets the metadata from info
 func (o *Object) setMetaData(info *api.Item) (err error) {
 	if info.GetFolder() != nil {
-		return errors.Wrapf(fs.ErrorNotAFile, "%q", o.remote)
+		return fs.ErrorIsDir
 	}
 	o.hasMetaData = true
 	o.size = info.GetSize()
@@ -1811,17 +1918,17 @@ func (o *Object) getPosition(ctx context.Context, url string) (pos int64, err er
 		return 0, err
 	}
 	if len(info.NextExpectedRanges) != 1 {
-		return 0, errors.Errorf("bad number of ranges in upload position: %v", info.NextExpectedRanges)
+		return 0, fmt.Errorf("bad number of ranges in upload position: %v", info.NextExpectedRanges)
 	}
 	position := info.NextExpectedRanges[0]
 	i := strings.IndexByte(position, '-')
 	if i < 0 {
-		return 0, errors.Errorf("no '-' in next expected range: %q", position)
+		return 0, fmt.Errorf("no '-' in next expected range: %q", position)
 	}
 	position = position[:i]
 	pos, err = strconv.ParseInt(position, 10, 64)
 	if err != nil {
-		return 0, errors.Wrapf(err, "bad expected range: %q", position)
+		return 0, fmt.Errorf("bad expected range: %q: %w", position, err)
 	}
 	return pos, nil
 }
@@ -1855,14 +1962,14 @@ func (o *Object) uploadFragment(ctx context.Context, url string, start int64, to
 			fs.Debugf(o, "Read position %d, chunk is %d..%d, bytes to skip = %d", pos, start, start+chunkSize, skip)
 			switch {
 			case skip < 0:
-				return false, errors.Wrapf(err, "sent block already (skip %d < 0), can't rewind", skip)
+				return false, fmt.Errorf("sent block already (skip %d < 0), can't rewind: %w", skip, err)
 			case skip > chunkSize:
-				return false, errors.Wrapf(err, "position is in the future (skip %d > chunkSize %d), can't skip forward", skip, chunkSize)
+				return false, fmt.Errorf("position is in the future (skip %d > chunkSize %d), can't skip forward: %w", skip, chunkSize, err)
 			case skip == chunkSize:
 				fs.Debugf(o, "Skipping chunk as already sent (skip %d == chunkSize %d)", skip, chunkSize)
 				return false, nil
 			}
-			return true, errors.Wrapf(err, "retry this chunk skipping %d bytes", skip)
+			return true, fmt.Errorf("retry this chunk skipping %d bytes: %w", skip, err)
 		}
 		if err != nil {
 			return shouldRetry(ctx, resp, err)
