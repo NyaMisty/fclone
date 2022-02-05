@@ -1,0 +1,47 @@
+name: Scheduled Merge Remote Action
+on: 
+  schedule:
+    - cron: '* 20 * * *'
+    # scheduled for 00:00 everyday
+  workflow_dispatch:
+
+jobs:
+  merge-upstream:
+    runs-on: ubuntu-latest
+    steps: 
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          ref: master             # set the branch to merge to
+          fetch-depth: 0
+      - name: Setup committer
+        run: |
+          git config --global user.email "misty@misty.moe"
+          git config --global user.name "NyaMisty"
+      - name: Merge Upstream
+        run: |
+          set +x
+          git remote add -f upstream "https://github.com/rclone/rclone" &&
+          git remote -v &&
+          git branch --all &&
+          git config --list &&
+          git checkout master
+          echo "Upstream log: "
+          git log --graph --oneline upstream/master | head -n 30
+          echo "Our log: "
+          git log --graph --oneline master | head -n 10
+          echo "Merge fork point: $(git merge-base --fork-point master upstream/master)"
+          git merge upstream/master -m "AutoMerge-$(date '+%Y%m%d-%H%M%S')"
+          git merge --abort || true;
+          echo "After Rebase:"
+          git log --graph --oneline master | head -n 30
+          echo "Re-tagging master!"
+          git branch -f master HEAD; git checkout master
+      #- name: Prepare to push  
+      #  run: git branch -f master
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.WORKER_GITHUB_PAT }}
+          branch: ${{ github.ref }}
+      - uses: gautamkrishnar/keepalive-workflow@master # using the workflow with default settings
