@@ -64,8 +64,8 @@ See the following for detailed instructions for
   * [Seafile](/seafile/)
   * [SFTP](/sftp/)
   * [Sia](/sia/)
+  * [Storj](/storj/)
   * [SugarSync](/sugarsync/)
-  * [Tardigrade](/tardigrade/)
   * [Union](/union/)
   * [Uptobox](/uptobox/)
   * [WebDAV](/webdav/)
@@ -550,7 +550,7 @@ Is equivalent to this:
 
 Bandwidth limit apply to the data transfer for all backends. For most
 backends the directory listing bandwidth is also included (exceptions
-being the non HTTP backends, `ftp`, `sftp` and `tardigrade`).
+being the non HTTP backends, `ftp`, `sftp` and `storj`).
 
 Note that the units are **Byte/s**, not **bit/s**. Typically
 connections are measured in bit/s - to convert divide by 8. For
@@ -807,6 +807,12 @@ which feature does what.
 This flag can be useful for debugging and in exceptional circumstances
 (e.g. Google Drive limiting the total volume of Server Side Copies to
 100 GiB/day).
+
+### --disable-http2
+
+This stops rclone from trying to use HTTP/2 if available. This can
+sometimes speed up transfers due to a
+[problem in the Go standard library](https://github.com/golang/go/issues/37373).
 
 ### --dscp VALUE ###
 
@@ -1645,8 +1651,7 @@ This can be very useful for `rclone mount` to control the behaviour of
 applications using it.
 
 This limit applies to all HTTP based backends and to the FTP and SFTP
-backends. It does not apply to the local backend or the Tardigrade
-backend.
+backends. It does not apply to the local backend or the Storj backend.
 
 See also `--tpslimit-burst`.
 
