@@ -1,7 +1,7 @@
 name: Scheduled Merge Remote Action
 on: 
   schedule:
-    - cron: '* 20 * * *'
+    - cron: '0 20 * * *'
     # scheduled for 00:00 everyday
   workflow_dispatch:
 
@@ -36,7 +36,7 @@ jobs:
           echo "After Rebase:"
           git log --graph --oneline master | head -n 30
           echo "Re-tagging master!"
-          git branch -f master HEAD; git checkout master
+          git checkout $(git rev-parse HEAD); git branch -f master HEAD; git checkout master
       #- name: Prepare to push  
       #  run: git branch -f master
       - name: Push changes
