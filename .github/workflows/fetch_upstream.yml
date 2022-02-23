@@ -40,8 +40,5 @@ jobs:
       #- name: Prepare to push  
       #  run: git branch -f master
       - name: Push changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.WORKER_GITHUB_PAT }}
-          branch: ${{ github.ref }}
+        run: git push https://${{ secrets.WORKER_GITHUB_PAT }}@github.com/NyaMisty/fclone.git
       - uses: gautamkrishnar/keepalive-workflow@master # using the workflow with default settings
