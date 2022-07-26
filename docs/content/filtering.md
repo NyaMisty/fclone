@@ -33,6 +33,9 @@ you expect. Instead use a `--filter...` flag.
 
 ### Pattern syntax
 
+Here is a formal definition of the pattern syntax,
+[examples](#examples) are below.
+
 Rclone matching rules follow a glob style:
 
     *         matches any sequence of non-separator (/) characters
@@ -42,8 +45,10 @@ Rclone matching rules follow a glob style:
               character class (must be non-empty)
     { pattern-list }
               pattern alternatives
+    {{ regexp }}
+              regular expression to match
     c         matches character c (c != *, **, ?, \, [, {, })
-    \c        matches reserved character c (c = *, **, ?, \, [, {, })
+    \c        matches reserved character c (c = *, **, ?, \, [, {, }) or character class
 
 character-range:
 
@@ -61,6 +66,10 @@ character classes (see [Go regular expression reference](https://golang.org/pkg/
     Named character classes (e.g. [\d], [^\d], [\D], [^\D])
     Perl character classes (e.g. \s, \S, \w, \W)
     ASCII character classes (e.g. [[:alnum:]], [[:alpha:]], [[:punct:]], [[:xdigit:]])
+
+regexp for advanced users to insert a regular expression - see [below](#regexp) for more info:
+
+    Any re2 regular expression not containing `}}`
 
 If the filter pattern starts with a `/` then it only matches
 at the top level of the directory tree,
@@ -110,6 +119,79 @@ With `--ignore-case`
 
     potato - matches "potato"
            - matches "POTATO"
+
+## Using regular expressions in filter patterns {#regexp}
+
+The syntax of filter patterns is glob style matching (like `bash`
+uses) to make things easy for users. However this does not provide
+absolute control over the matching, so for advanced users rclone also
+provides a regular expression syntax.
+
+The regular expressions used are as defined in the [Go regular
+expression reference](https://golang.org/pkg/regexp/syntax/). Regular
+expressions should be enclosed in `{{` `}}`. They will match only the
+last path segment if the glob doesn't start with `/` or the whole path
+name if it does. Note that rclone does not attempt to parse the
+supplied regular expression, meaning that using any regular expression
+filter will prevent rclone from using [directory filter rules](#directory_filter),
+as it will instead check every path against
+the supplied regular expression(s).
+
+Here is how the `{{regexp}}` is transformed into an full regular
+expression to match the entire path:
+
+    {{regexp}}  becomes (^|/)(regexp)$
+    /{{regexp}} becomes ^(regexp)$
+
+Regexp syntax can be mixed with glob syntax, for example
+
+    *.{{jpe?g}} to match file.jpg, file.jpeg but not file.png
+
+You can also use regexp flags - to set case insensitive, for example
+
+    *.{{(?i)jpg}} to match file.jpg, file.JPG but not file.png
+
+Be careful with wildcards in regular expressions - you don't want them
+to match path separators normally. To match any file name starting
+with `start` and ending with `end` write
+
+    {{start[^/]*end\.jpg}}
+
+Not
+
+    {{start.*end\.jpg}}
+
+Which will match a directory called `start` with a file called
+`end.jpg` in it as the `.*` will match `/` characters.
+
+Note that you can use `-vv --dump filters` to show the filter patterns
+in regexp format - rclone implements the glob patters by transforming
+them into regular expressions.
+
+## Filter pattern examples {#examples}
+
+| Description | Pattern | Matches | Does not match |
+| ----------- |-------- | ------- | -------------- |
+| Wildcard    | `*.jpg` | `/file.jpg`     | `/file.png`    |
+|             |         | `/dir/file.jpg` | `/dir/file.png` |
+| Rooted      | `/*.jpg` | `/file.jpg`    | `/file.png`    |
+|             |          | `/file2.jpg`    | `/dir/file.jpg` |
+| Alternates  | `*.{jpg,png}` | `/file.jpg`     | `/file.gif`    |
+|             |         | `/dir/file.gif` | `/dir/file.gif` |
+| Path Wildcard | `dir/**` | `/dir/anyfile`     | `file.png`    |
+|             |          | `/subdir/dir/subsubdir/anyfile` | `/subdir/file.png` |
+| Any Char    | `*.t?t` | `/file.txt`     | `/file.qxt`    |
+|             |         | `/dir/file.tzt` | `/dir/file.png` |
+| Range       | `*.[a-z]` | `/file.a`     | `/file.0`    |
+|             |         | `/dir/file.b` | `/dir/file.1` |
+| Escape      | `*.\?\?\?` | `/file.???`     | `/file.abc`    |
+|             |         | `/dir/file.???` | `/dir/file.def` |
+| Class       | `*.\d\d\d` | `/file.012`     | `/file.abc`    |
+|             |         | `/dir/file.345` | `/dir/file.def` |
+| Regexp      | `*.{{jpe?g}}` | `/file.jpeg`     | `/file.png`    |
+|             |         | `/dir/file.jpg` | `/dir/file.jpeeg` |
+| Rooted Regexp | `/{{.*\.jpe?g}}` | `/file.jpeg`  | `/file.png`    |
+|             |                  | `/file.jpg`   | `/dir/file.jpg` |
 
 ## How filter rules are applied to files
 
@@ -169,7 +251,7 @@ currently a means provided to pass regular expression filter options into
 rclone directly though character class filter rules contain character
 classes. [Go regular expression reference](https://golang.org/pkg/regexp/syntax/)
 
-### How filter rules are applied to directories
+### How filter rules are applied to directories {#directory_filter}
 
 Rclone commands are applied to path/file names not
 directories. The entire contents of a directory can be matched
@@ -185,10 +267,14 @@ recurse into subdirectories. This potentially optimises access to a remote
 by avoiding listing unnecessary directories. Whether optimisation is
 desirable depends on the specific filter rules and source remote content.
 
+If any [regular expression filters](#regexp) are in use, then no
+directory recursion optimisation is possible, as rclone must check
+every path against the supplied regular expression(s).
+
 Directory recursion optimisation occurs if either:
 
 * A source remote does not support the rclone `ListR` primitive. local,
-sftp, Microsoft OneDrive and WebDav do not support `ListR`. Google
+sftp, Microsoft OneDrive and WebDAV do not support `ListR`. Google
 Drive and most bucket type storage do. [Full list](https://rclone.org/overview/#optional-features)
 
 * On other remotes (those that support `ListR`), if the rclone command is not naturally recursive, and
@@ -664,7 +750,9 @@ Useful for debugging.
 
 The `--exclude-if-present` flag controls whether a directory is
 within the scope of an rclone command based on the presence of a
-named file within it.
+named file within it. The flag can be repeated to check for
+multiple file names, presence of any of them will exclude the
+directory.
 
 This flag has a priority over other filter flags.
 
@@ -677,8 +765,6 @@ E.g. for the following directory structure:
 
 The command `rclone ls --exclude-if-present .ignore dir1` does
 not list `dir3`, `file3` or `.ignore`.
-
-`--exclude-if-present` can only be used once in an rclone command.
 
 ## Common pitfalls
 

@@ -302,8 +302,8 @@ func (f *Fs) createUpload(ctx context.Context, name string, size int64, parentID
 		if err != nil {
 			return false, err
 		}
-		if resp.StatusCode != 201 {
-			return false, fmt.Errorf("unexpected status code from upload create: %d", resp.StatusCode)
+		if err := checkStatusCode(resp, 201); err != nil {
+			return shouldRetry(ctx, err)
 		}
 		location = resp.Header.Get("location")
 		if location == "" {
@@ -647,7 +647,7 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 		return shouldRetry(ctx, err)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("about failed: %w", err)
+		return nil, err
 	}
 	return &fs.Usage{
 		Total: fs.NewUsageValue(ai.Disk.Size),  // quota of bytes that can be used

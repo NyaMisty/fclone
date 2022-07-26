@@ -62,7 +62,7 @@ func TestNewFilterForbiddenMixOfFilesFromAndFilterRule(t *testing.T) {
 
 	_, err := NewFilter(&Opt)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "The usage of --files-from overrides all other filters")
+	require.Contains(t, err.Error(), "the usage of --files-from overrides all other filters")
 }
 
 func TestNewFilterForbiddenMixOfFilesFromRawAndFilterRule(t *testing.T) {
@@ -85,7 +85,7 @@ func TestNewFilterForbiddenMixOfFilesFromRawAndFilterRule(t *testing.T) {
 
 	_, err := NewFilter(&Opt)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "The usage of --files-from-raw overrides all other filters")
+	require.Contains(t, err.Error(), "the usage of --files-from-raw overrides all other filters")
 }
 
 func TestNewFilterWithFilesFromAlone(t *testing.T) {
@@ -503,6 +503,31 @@ func TestNewFilterMatchesIgnoreCase(t *testing.T) {
 	assert.False(t, f.InActive())
 }
 
+func TestNewFilterMatchesRegexp(t *testing.T) {
+	f, err := NewFilter(nil)
+	require.NoError(t, err)
+	add := func(s string) {
+		err := f.AddRule(s)
+		require.NoError(t, err)
+	}
+	add(`+ /{{file\d+\.png}}`)
+	add(`+ *.{{(?i)jpg}}`)
+	add(`- *`)
+	testInclude(t, f, []includeTest{
+		{"file2.png", 100, 0, true},
+		{"sub/file2.png", 100, 0, false},
+		{"file123.png", 100, 0, true},
+		{"File123.png", 100, 0, false},
+		{"something.jpg", 100, 0, true},
+		{"deep/path/something.JPG", 100, 0, true},
+		{"something.gif", 100, 0, false},
+	})
+	testDirInclude(t, f, []includeDirTest{
+		{"anything at all", true},
+	})
+	assert.False(t, f.InActive())
+}
+
 func TestFilterAddDirRuleOrFileRule(t *testing.T) {
 	for _, test := range []struct {
 		included bool
@@ -773,7 +798,7 @@ func TestGetConfig(t *testing.T) {
 	ctx := context.Background()
 
 	// Check nil
-	config := GetConfig(nil)
+	config := GetConfig(nil) //lint:ignore SA1012 we want to test passing a nil Context and therefore ignore lint suggestion of using context.TODO
 	assert.Equal(t, globalConfig, config)
 
 	// Check empty config

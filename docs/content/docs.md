@@ -28,6 +28,7 @@ option:
 See the following for detailed instructions for
 
   * [1Fichier](/fichier/)
+  * [Akamai Netstorage](/netstorage/)
   * [Alias](/alias/)
   * [Amazon Drive](/amazonclouddrive/)
   * [Amazon S3](/s3/)
@@ -36,8 +37,10 @@ See the following for detailed instructions for
   * [Chunker](/chunker/) - transparently splits large files for other remotes
   * [Citrix ShareFile](/sharefile/)
   * [Compress](/compress/)
+  * [Combine](/combine/)
   * [Crypt](/crypt/) - to encrypt other remotes
   * [DigitalOcean Spaces](/s3/#digitalocean-spaces)
+  * [Digi Storage](/koofr/#digi-storage)
   * [Dropbox](/dropbox/)
   * [Enterprise File Fabric](/filefabric/)
   * [FTP](/ftp/)
@@ -46,8 +49,10 @@ See the following for detailed instructions for
   * [Google Photos](/googlephotos/)
   * [Hasher](/hasher/) - to handle checksums for other remotes
   * [HDFS](/hdfs/)
+  * [HiDrive](/hidrive/)
   * [HTTP](/http/)
   * [Hubic](/hubic/)
+  * [Internet Archive](/internetarchive/)
   * [Jottacloud](/jottacloud/)
   * [Koofr](/koofr/)
   * [Mail.ru Cloud](/mailru/)
@@ -421,6 +426,126 @@ This can be used when scripting to make aged backups efficiently, e.g.
     rclone sync -i remote:current-backup remote:previous-backup
     rclone sync -i /path/to/files remote:current-backup
 
+## Metadata support {#metadata}
+
+Metadata is data about a file which isn't the contents of the file.
+Normally rclone only preserves the modification time and the content
+(MIME) type where possible.
+
+Rclone supports preserving all the available metadata on files (not
+directories) when using the `--metadata` or `-M` flag.
+
+Exactly what metadata is supported and what that support means depends
+on the backend. Backends that support metadata have a metadata section
+in their docs and are listed in the [features table](/overview/#features)
+(Eg [local](/local/#metadata), [s3](/s3/#metadata))
+
+Rclone only supports a one-time sync of metadata. This means that
+metadata will be synced from the source object to the destination
+object only when the source object has changed and needs to be
+re-uploaded. If the metadata subsequently changes on the source object
+without changing the object itself then it won't be synced to the
+destination object. This is in line with the way rclone syncs
+`Content-Type` without the `--metadata` flag.
+
+Using `--metadata` when syncing from local to local will preserve file
+attributes such as file mode, owner, extended attributes (not
+Windows).
+
+Note that arbitrary metadata may be added to objects using the
+`--metadata-set key=value` flag when the object is first uploaded.
+This flag can be repeated as many times as necessary.
+
+### Types of metadata
+
+Metadata is divided into two type. System metadata and User metadata.
+
+Metadata which the backend uses itself is called system metadata. For
+example on the local backend the system metadata `uid` will store the
+user ID of the file when used on a unix based platform.
+
+Arbitrary metadata is called user metadata and this can be set however
+is desired.
+
+When objects are copied from backend to backend, they will attempt to
+interpret system metadata if it is supplied. Metadata may change from
+being user metadata to system metadata as objects are copied between
+different backends. For example copying an object from s3 sets the
+`content-type` metadata. In a backend which understands this (like
+`azureblob`) this will become the Content-Type of the object. In a
+backend which doesn't understand this (like the `local` backend) this
+will become user metadata. However should the local object be copied
+back to s3, the Content-Type will be set correctly.
+
+### Metadata framework
+
+Rclone implements a metadata framework which can read metadata from an
+object and write it to the object when (and only when) it is being
+uploaded.
+
+This metadata is stored as a dictionary with string keys and string
+values.
+
+There are some limits on the names of the keys (these may be clarified
+further in the future).
+
+- must be lower case
+- may be `a-z` `0-9` containing `.` `-` or `_`
+- length is backend dependent
+
+Each backend can provide system metadata that it understands. Some
+backends can also store arbitrary user metadata.
+
+Where possible the key names are standardized, so, for example, it is
+possible to copy object metadata from s3 to azureblob for example and
+metadata will be translated apropriately.
+
+Some backends have limits on the size of the metadata and rclone will
+give errors on upload if they are exceeded.
+
+### Metadata preservation
+
+The goal of the implementation is to
+
+1. Preserve metadata if at all possible
+2. Interpret metadata if at all possible
+
+The consequences of 1 is that you can copy an S3 object to a local
+disk then back to S3 losslessly. Likewise you can copy a local file
+with file attributes and xattrs from local disk to s3 and back again
+losslessly.
+
+The consequence of 2 is that you can copy an S3 object with metadata
+to Azureblob (say) and have the metadata appear on the Azureblob
+object also.
+
+### Standard system metadata
+
+Here is a table of standard system metadata which, if appropriate, a
+backend may implement.
+
+| key                 | description | example |
+|---------------------|-------------|---------|
+| mode                | File type and mode: octal, unix style | 0100664 |
+| uid                 | User ID of owner: decimal number | 500 |
+| gid                 | Group ID of owner: decimal number | 500 |
+| rdev                | Device ID (if special file)  => hexadecimal | 0 |
+| atime               | Time of last access:  RFC 3339 | 2006-01-02T15:04:05.999999999Z07:00 |
+| mtime               | Time of last modification:  RFC 3339 | 2006-01-02T15:04:05.999999999Z07:00 |
+| btime               | Time of file creation (birth):  RFC 3339 | 2006-01-02T15:04:05.999999999Z07:00 |
+| cache-control       | Cache-Control header | no-cache |
+| content-disposition | Content-Disposition header | inline |
+| content-encoding    | Content-Encoding header | gzip |
+| content-language    | Content-Language header | en-US |
+| content-type        | Content-Type header | text/plain |
+
+The metadata keys `mtime` and `content-type` will take precedence if
+supplied in the metadata over reading the `Content-Type` or
+modification time of the source object.
+
+Hashes are not included in system metadata as there is a well defined
+way of reading those already.
+
 Options
 -------
 
@@ -457,7 +582,8 @@ been added) in DIR, then it will be overwritten.
 
 The remote in use must support server-side move or copy and you must
 use the same remote as the destination of the sync.  The backup
-directory must not overlap the destination directory.
+directory must not overlap the destination directory without it being
+excluded by a filter rule.
 
 For example
 
@@ -635,12 +761,22 @@ objects to transfer is held in memory before the transfers start.
 
 ### --checkers=N ###
 
-The number of checkers to run in parallel.  Checkers do the equality
-checking of files during a sync.  For some storage systems (e.g. S3,
-Swift, Dropbox) this can take a significant amount of time so they are
-run in parallel.
+Originally controlling just the number of file checkers to run in parallel, 
+e.g. by `rclone copy`. Now a fairly universal parallelism control 
+used by `rclone` in several places. 
 
-The default is to run 8 checkers in parallel.
+Note: checkers do the equality checking of files during a sync. 
+For some storage systems (e.g. S3, Swift, Dropbox) this can take 
+a significant amount of time so they are run in parallel.
+
+The default is to run 8 checkers in parallel. However, in case 
+of slow-reacting backends you may need to lower (rather than increase)
+this default by setting `--checkers` to 4 or less threads. This is 
+especially advised if you are experiencing backend server crashes 
+during file checking phase (e.g. on subsequent or top-up backups 
+where little or no file copying is done and checking takes up 
+most of the time). Increase this setting only with utmost care, 
+while monitoring your server health and file checking throughput.
 
 ### -c, --checksum ###
 
@@ -785,7 +921,9 @@ See `--compare-dest` and `--backup-dir`.
 
 ### --dedupe-mode MODE ###
 
-Mode to run dedupe command in.  One of `interactive`, `skip`, `first`, `newest`, `oldest`, `rename`.  The default is `interactive`.  See the dedupe command for more information as to what these options mean.
+Mode to run dedupe command in.  One of `interactive`, `skip`, `first`, 
+`newest`, `oldest`, `rename`.  The default is `interactive`.  
+See the dedupe command for more information as to what these options mean.
 
 ### --disable FEATURE,FEATURE,... ###
 
@@ -937,22 +1075,22 @@ unit prefix appended to the value (e.g. `9.762Ki`), while in more textual output
 the full unit is shown (e.g. `9.762 KiB`). For counts the SI standard notation is
 used, e.g. prefix `k` for kilo. Used with file counts, `1k` means 1000 files.
 
-The various [list](commands/rclone_ls/) commands output raw numbers by default.
+The various [list](/commands/rclone_ls/) commands output raw numbers by default.
 Option `--human-readable` will make them output values in human-readable format
 instead (with the short unit prefix).
 
-The [about](commands/rclone_about/) command outputs human-readable by default,
+The [about](/commands/rclone_about/) command outputs human-readable by default,
 with a command-specific option `--full` to output the raw numbers instead.
 
-Command [size](commands/rclone_size/) outputs both human-readable and raw numbers
+Command [size](/commands/rclone_size/) outputs both human-readable and raw numbers
 in the same output.
 
-The [tree](commands/rclone_tree/) command also considers `--human-readable`, but
+The [tree](/commands/rclone_tree/) command also considers `--human-readable`, but
 it will not use the exact same notation as the other commands: It rounds to one
 decimal, and uses single letter suffix, e.g. `K` instead of `Ki`. The reason for
 this is that it relies on an external library.
 
-The interactive command [ncdu](commands/rclone_ncdu/) shows human-readable by
+The interactive command [ncdu](/commands/rclone_ncdu/) shows human-readable by
 default, and responds to key `u` for toggling human-readable format.
 
 ### --ignore-case-sync ###
@@ -1083,7 +1221,12 @@ have a signal to rotate logs.
 
 ### --log-format LIST ###
 
-Comma separated list of log format options. Accepted options are `date`, `time`, `microseconds`, `pid`, `longfile`, `shortfile`, `UTC`. Any other keywords will be silently ignored. `pid` will tag log messages with process identifier which useful with `rclone mount --daemon`. Other accepted options are explained in the [go documentation](https://pkg.go.dev/log#pkg-constants). The default log format is "`date`,`time`".
+Comma separated list of log format options. Accepted options are `date`, 
+`time`, `microseconds`, `pid`, `longfile`, `shortfile`, `UTC`. Any other 
+keywords will be silently ignored. `pid` will tag log messages with process
+identifier which useful with `rclone mount --daemon`. Other accepted
+options are explained in the [go documentation](https://pkg.go.dev/log#pkg-constants).
+The default log format is "`date`,`time`".
 
 ### --log-level LEVEL ###
 
@@ -1184,6 +1327,18 @@ Defaults to off.
 When the limit is reached all transfers will stop immediately.
 
 Rclone will exit with exit code 8 if the transfer limit is reached.
+
+## --metadata / -M
+
+Setting this flag enables rclone to copy the metadata from the source
+to the destination. For local backends this is ownership, permissions,
+xattr etc. See the [#metadata](metadata section) for more info.
+
+### --metadata-set key=value
+
+Add metadata `key` = `value` when uploading. This can be repeated as
+many times as required. See the [#metadata](metadata section) for more
+info.
 
 ### --cutoff-mode=hard|soft|cautious ###
 
@@ -1489,6 +1644,18 @@ This sets the interval between each retry specified by `--retries`
 
 The default is `0`. Use `0` to disable.
 
+### --server-side-across-configs ###
+
+Allow server-side operations (e.g. copy or move) to work across
+different configurations.
+
+This can be useful if you wish to do a server-side copy or move
+between two remotes which use the same backend but are configured
+differently.
+
+Note that this isn't enabled by default because it isn't easy for
+rclone to tell if it will work between any two configurations.
+
 ### --size-only ###
 
 Normally rclone will look at modification time and size of files to
@@ -1791,6 +1958,8 @@ of timeouts or bigger if you have lots of bandwidth and a fast remote.
 
 The default is to run 4 file transfers in parallel.
 
+Look at --multi-thread-streams if you would like to control single file transfers.
+
 ### -u, --update ###
 
 This forces rclone to skip any files which exist on the destination
@@ -1861,6 +2030,9 @@ a small number of significant events.
 With `-vv` rclone will become very verbose telling you about every
 file it considers and transfers.  Please send bug reports with a log
 with this setting.
+
+When setting verbosity as an environment variable, use
+`RCLONE_VERBOSE=1` or `RCLONE_VERBOSE=2` for `-v` and `-vv` respectively.
 
 ### -V, --version ###
 
@@ -2120,6 +2292,7 @@ For the filtering options
   * `--filter-from`
   * `--exclude`
   * `--exclude-from`
+  * `--exclude-if-present`
   * `--include`
   * `--include-from`
   * `--files-from`
@@ -2226,6 +2399,10 @@ override the environment variable setting.
 
 Or to always use the trash in drive `--drive-use-trash`, set
 `RCLONE_DRIVE_USE_TRASH=true`.
+
+Verbosity is slightly different, the environment variable 
+equivalent of `--verbose` or `-v` is `RCLONE_VERBOSE=1`, 
+or for `-vv`, `RCLONE_VERBOSE=2`.
 
 The same parser is used for the options and the environment variables
 so they take exactly the same form.
