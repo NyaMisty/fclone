@@ -1276,11 +1276,42 @@ func (item *Item) WriteAt(b []byte, off int64) (n int, err error) {
 		return 0, errors.New("vfs cache item WriteAt: internal error: didn't Open file")
 	}
 	item.mu.Unlock()
+
 	// Do the writing with Item.mu unlocked
-	n, err = item.fd.WriteAt(b, off)
-	if err == nil && n != len(b) {
-		err = fmt.Errorf("short write: tried to write %d but only %d written", len(b), n)
+	retryWriteN := 0
+	retryWriteOff := off
+
+	var expBackOff int
+	for retries := 0; retries < fs.GetConfig(context.TODO()).LowLevelRetries; retries++ {
+		n, err = item.fd.WriteAt(b[retryWriteN:], retryWriteOff)
+		if err == nil && n != len(b)-retryWriteN {
+			err = fmt.Errorf("short write: tried to write %d but only %d written", len(b), n)
+		}
+		retryWriteN += n
+		retryWriteOff += int64(n)
+
+		if err == nil {
+			break
+		}
+		fs.Debugf(item.name, "vfs cache: failed to _ensureWrite cache %v", err)
+		if !fserrors.IsErrNoSpace(err) && err.Error() != "no space left on device" {
+			fs.Errorf(item.name, "vfs cache: failed to _ensureWrite cache %v is not out of space", err)
+			break
+		} else {
+		}
+		item.c.KickCleaner()
+		expBackOff = 2 << uint(retries)
+		if retries >= 13 { // 2<<13 would be 16384, which is 16s
+			expBackOff = 16384
+		}
+		time.Sleep(time.Duration(expBackOff) * time.Millisecond) // Exponential back-off the retries
 	}
+	if fserrors.IsErrNoSpace(err) {
+		fs.Errorf(item.name, "vfs cache: failed to _ensureWrite cache after retries %v", err)
+	}
+
+	n = retryWriteN
+
 	item.mu.Lock()
 	item._written(off, int64(n))
 	if n > 0 {
