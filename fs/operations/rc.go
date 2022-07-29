@@ -7,6 +7,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 	"time"
@@ -190,6 +191,108 @@ func rcMoveOrCopyFile(ctx context.Context, in rc.Params, cp bool) (out rc.Params
 		return nil, err
 	}
 	return nil, moveOrCopyFile(ctx, dstFs, srcFs, dstRemote, srcRemote, cp)
+}
+
+func init() {
+	name := "RcatSize"
+	rc.Add(rc.Call{
+		Path:         "operations/" + strings.ToLower(name),
+		AuthRequired: true,
+		Fn: func(ctx context.Context, in rc.Params) (rc.Params, error) {
+			return rcRcatSize(ctx, in)
+		},
+		Title: name + " a file from source remote to destination remote",
+		Help: `This takes the following parameters:
+
+- type - type of rcat input, can be a fifo or tcp_client
+	- fifo: send data to rclone through fifo file (created by mkfifo)
+	- tcp_client: send data to a TCP port listened by rclone
+- addr - the stream info for corresponding type
+	- for fifo: the fifo file path (must be absolute)
+	- for tcp_client: the temporary TCP port listened by rclone
+- size - the size of rcat stream, -1 if unknown
+- fs - a remote name string e.g. "drive2:" for the destination
+- remote - a path within that remote e.g. "file2.txt" for the destination
+`,
+	})
+}
+
+// RcatSize stream create a file
+func rcRcatSize(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	rcatType, err := in.GetString("type")
+	if err != nil {
+		return nil, err
+	}
+	rcatAddr, err := in.GetString("addr")
+	if err != nil {
+		return nil, err
+	}
+	size, err := in.GetInt64("size")
+	if err != nil {
+		return nil, err
+	}
+	//dstFs, dstRemote, err := rc.GetFsAndRemoteNamed(ctx, in, "dstFs", "dstRemote")
+	dstFs, dstRemote, err := rc.GetFsAndRemote(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+
+	fs.Debugf(nil, "rcRcatSize got type %v addr %v size %v", rcatType, rcatAddr, size)
+
+	var rcatReader io.ReadCloser
+	switch (rcatType) {
+	case "fifo":
+		if !strings.HasPrefix(rcatAddr, "/") {
+			return nil, fmt.Errorf("rcat addr fifo file must be absolute")
+		}
+		fs.Debugf(nil, "rcRcatSize opening fifo %v", rcatAddr)
+		file, err := os.OpenFile(rcatAddr, os.O_RDONLY, os.ModeNamedPipe)
+		if err != nil {
+			return nil, err
+		}
+		rcatReader = file
+	case "tcp_client":
+		return nil, fmt.Errorf("rcatsize tcp_client not implemented")
+	}
+
+	dstFile, err := RcatSize(context.Background(), dstFs, dstRemote, rcatReader, size, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	fsObjToJson := func (entry fs.Object) *ListJSONItem {
+		item := &ListJSONItem{
+			Path: entry.Remote(),
+			Name: path.Base(entry.Remote()),
+			Size: entry.Size(),
+		}
+		if entry.Remote() == "" {
+			item.Name = ""
+		}
+		item.ModTime = Timestamp{When: entry.ModTime(ctx), Format: time.RFC3339}
+		item.MimeType = fs.MimeTypeDirEntry(ctx, entry)
+		if do, ok := entry.(fs.IDer); ok {
+			item.ID = do.ID()
+		}
+		if o, ok := entry.(fs.Object); ok {
+			if do, ok := fs.UnWrapObject(o).(fs.IDer); ok {
+				item.OrigID = do.ID()
+			}
+		}
+		switch x := entry.(type) {
+		case fs.Directory:
+			item.IsDir = true
+		case fs.Object:
+			item.IsDir = false
+			_ = x
+		default:
+			fs.Errorf(nil, "Unknown type %T in listing in ListJSON", entry)
+		}
+		return item
+	}
+	dstFileJson := fsObjToJson(dstFile)
+	out = make(rc.Params)
+	out["file"] = dstFileJson
+	return out, nil
 }
 
 func init() {
