@@ -211,6 +211,7 @@ func init() {
 	- for fifo: the fifo file path (must be absolute)
 	- for tcp_client: the temporary TCP port listened by rclone
 - size - the size of rcat stream, -1 if unknown
+- modtime - the modification time of destination file, using current time if not supplied
 - fs - a remote name string e.g. "drive2:" for the destination
 - remote - a path within that remote e.g. "file2.txt" for the destination
 `,
@@ -231,16 +232,30 @@ func rcRcatSize(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 	if err != nil {
 		return nil, err
 	}
+
+	modTimeString, err := in.GetString("modtime")
+	var modTime time.Time
+	if err == nil {
+		modTime, err = fs.ParseTime(modTimeString)
+		if err != nil {
+			err = rc.NewErrParamInvalid(fmt.Errorf("parse time: %w", err))
+		}
+	}
+	if rc.IsErrParamNotFound(err) {
+		modTime = time.Now()
+	} else if err != nil {
+		return nil, err
+	}
 	//dstFs, dstRemote, err := rc.GetFsAndRemoteNamed(ctx, in, "dstFs", "dstRemote")
 	dstFs, dstRemote, err := rc.GetFsAndRemote(ctx, in)
 	if err != nil {
 		return nil, err
 	}
 
-	fs.Debugf(nil, "rcRcatSize got type %v addr %v size %v", rcatType, rcatAddr, size)
+	fs.Debugf(nil, "rcRcatSize got type %v addr %v size %v modTime %s", rcatType, rcatAddr, size, modTime)
 
 	var rcatReader io.ReadCloser
-	switch (rcatType) {
+	switch rcatType {
 	case "fifo":
 		if !strings.HasPrefix(rcatAddr, "/") {
 			return nil, fmt.Errorf("rcat addr fifo file must be absolute")
@@ -255,11 +270,11 @@ func rcRcatSize(ctx context.Context, in rc.Params) (out rc.Params, err error) {
 		return nil, fmt.Errorf("rcatsize tcp_client not implemented")
 	}
 
-	dstFile, err := RcatSize(context.Background(), dstFs, dstRemote, rcatReader, size, time.Now())
+	dstFile, err := RcatSize(context.Background(), dstFs, dstRemote, rcatReader, size, modTime)
 	if err != nil {
 		return nil, err
 	}
-	fsObjToJson := func (entry fs.Object) *ListJSONItem {
+	fsObjToJson := func(entry fs.Object) *ListJSONItem {
 		item := &ListJSONItem{
 			Path: entry.Remote(),
 			Name: path.Base(entry.Remote()),
