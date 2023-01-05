@@ -163,17 +163,17 @@ func (w *MessagedWriter) Close() (err error) {
 type WriteFileHandle struct {
 	baseHandle
 	mu          sync.Mutex
-	cond        *sync.Cond // cond lock for out of sequence writes
-	closed      bool       // set if handle has been closed
+	cond        sync.Cond // cond lock for out of sequence writes
 	remote      string
 	pipeWriter  *MessagedWriter
 	o           fs.Object
 	result      chan error
 	file        *File
-	writeCalled bool // set the first time Write() is called
 	offset      int64
-	opened      bool
 	flags       int
+	closed      bool // set if handle has been closed
+	writeCalled bool // set the first time Write() is called
+	opened      bool
 	truncated   bool
 }
 
@@ -192,7 +192,7 @@ func newWriteFileHandle(d *Dir, f *File, remote string, flags int) (*WriteFileHa
 		result: make(chan error, 1),
 		file:   f,
 	}
-	fh.cond = sync.NewCond(&fh.mu)
+	fh.cond = sync.Cond{L: &fh.mu}
 	fh.file.addWriter(fh)
 	return fh, nil
 }
@@ -213,20 +213,20 @@ func (fh *WriteFileHandle) openPending() (err error) {
 		fs.Errorf(fh.remote, "WriteFileHandle: Can't open for write without O_TRUNC on existing file without --vfs-cache-mode >= writes")
 		return EPERM
 	}
-
+	writerFunc := func(pipeReader *io.PipeReader) {
+		// NB Rcat deals with Stats.Transferring, etc.
+		o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now(), nil)
+		if err != nil {
+			fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
+		}
+		// Close the pipeReader so the pipeWriter fails with ErrClosedPipe
+		_ = pipeReader.Close()
+		fh.o = o
+		fh.result <- err
+	}
 	fh.pipeWriter = GetMessagedWriter(fh, func() io.WriteCloser {
 		pipeReader, pipeWriter := io.Pipe()
-		go func() {
-			// NB Rcat deals with Stats.Transferring, etc.
-			o, err := operations.Rcat(context.TODO(), fh.file.Fs(), fh.remote, pipeReader, time.Now())
-			if err != nil {
-				fs.Errorf(fh.remote, "WriteFileHandle.New Rcat failed: %v", err)
-			}
-			// Close the pipeReader so the pipeWriter fails with ErrClosedPipe
-			_ = pipeReader.Close()
-			fh.o = o
-			fh.result <- err
-		}()
+		go writerFunc(pipeReader)
 		return pipeWriter
 	})
 	fh.file.setSize(0)
@@ -282,7 +282,7 @@ func (fh *WriteFileHandle) writeAt(p []byte, off int64) (n int, err error) {
 		return 0, ECLOSED
 	}
 	if fh.offset != off {
-		waitSequential("write", fh.remote, fh.cond, fh.file.VFS().Opt.WriteWait, &fh.offset, off)
+		waitSequential("write", fh.remote, &fh.cond, fh.file.VFS().Opt.WriteWait, &fh.offset, off)
 	}
 	if fh.offset != off && !fh.file.messagedWrite {
 		fs.Errorf(fh.remote, "WriteFileHandle.Write: can't seek in file without --vfs-cache-mode >= writes")

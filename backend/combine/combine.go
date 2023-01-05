@@ -1,4 +1,4 @@
-// Package combine implents a backend to combine multipe remotes in a directory tree
+// Package combine implents a backend to combine multiple remotes in a directory tree
 package combine
 
 /*
@@ -145,6 +145,7 @@ func (f *Fs) newUpstream(ctx context.Context, dir, remote string) (*upstream, er
 		dir:            dir,
 		pathAdjustment: newAdjustment(f.root, dir),
 	}
+	cache.PinUntilFinalized(u.f, u)
 	return u, nil
 }
 
@@ -456,9 +457,9 @@ func (f *Fs) Purge(ctx context.Context, dir string) error {
 
 // Copy src to this remote using server-side copy operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -490,9 +491,9 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 
 // Move src to this remote using server-side move operations.
 //
-// This is stored with the remote path given
+// This is stored with the remote path given.
 //
-// It returns the destination Object and a possible error
+// It returns the destination Object and a possible error.
 //
 // Will only be called if src.Fs().Name() == f.Name()
 //
@@ -630,7 +631,7 @@ func (f *Fs) put(ctx context.Context, in io.Reader, src fs.ObjectInfo, stream bo
 	if err != nil {
 		return nil, err
 	}
-	uSrc := operations.NewOverrideRemote(src, uRemote)
+	uSrc := fs.NewOverrideRemote(src, uRemote)
 	var o fs.Object
 	if stream {
 		o, err = u.f.Features().PutStream(ctx, in, uSrc, options...)

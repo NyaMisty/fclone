@@ -1,3 +1,4 @@
+// Package oauthutil provides OAuth utilities.
 package oauthutil
 
 import (
@@ -433,10 +434,10 @@ func ConfigOut(state string, oAuth *Options) (*fs.ConfigOut, error) {
 //
 // This is called with a state which has pushed on it
 //
-//    state prefixed with "*oauth"
-//    state for oauth to return to
-//    state that returned the OAuth when we wish to recall it
-//    value that returned the OAuth
+//	state prefixed with "*oauth"
+//	state for oauth to return to
+//	state that returned the OAuth when we wish to recall it
+//	value that returned the OAuth
 func ConfigOAuth(ctx context.Context, name string, m configmap.Mapper, ri *fs.RegInfo, in fs.ConfigIn) (*fs.ConfigOut, error) {
 	stateParams, state := fs.StatePop(in.State)
 
@@ -479,7 +480,7 @@ func ConfigOAuth(ctx context.Context, name string, m configmap.Mapper, ri *fs.Re
 		if in.Result == "false" {
 			return fs.ConfigGoto(newState("*oauth-done"))
 		}
-		return fs.ConfigConfirm(newState("*oauth-islocal"), true, "config_is_local", "Use auto config?\n * Say Y if not sure\n * Say N if you are working on a remote or headless machine\n")
+		return fs.ConfigConfirm(newState("*oauth-islocal"), true, "config_is_local", "Use web browser to automatically authenticate rclone with remote?\n * Say Y if the machine running rclone has a web browser you can use\n * Say N if running rclone on a (remote) machine without web browser access\nIf not sure try Y. If Y failed, try N.\n")
 	case "*oauth-islocal":
 		if in.Result == "true" {
 			return fs.ConfigGoto(newState("*oauth-do"))
@@ -624,7 +625,7 @@ func fixRedirect(oauthConfig *oauth2.Config) *oauth2.Config {
 
 // configSetup does the initial creation of the token
 //
-// If opt is nil it will use the default Options
+// If opt is nil it will use the default Options.
 //
 // It will run an internal webserver to receive the results
 func configSetup(ctx context.Context, id, name string, m configmap.Mapper, oauthConfig *oauth2.Config, opt *Options) (string, error) {

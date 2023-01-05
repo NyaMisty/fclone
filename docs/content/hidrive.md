@@ -1,6 +1,7 @@
 ---
 title: "HiDrive"
 description: "Rclone docs for HiDrive"
+versionIntroduced: "v1.59"
 ---
 
 # {{< icon "fa fa-cloud" >}} HiDrive
@@ -44,7 +45,10 @@ Leave blank normally.
 scope_access>
 Edit advanced config?
 y/n> n
-Use auto config?
+Use web browser to automatically authenticate rclone with remote?
+ * Say Y if the machine running rclone has a web browser you can use
+ * Say N if running rclone on a (remote) machine without web browser access
+If not sure try Y. If Y failed, try N.
 y/n> y
 If your browser doesn't open automatically go to the following link: http://127.0.0.1:53682/auth?state=xxxxxxxxxxxxxxxxxxxxxx
 Log in and authorize rclone for access
@@ -124,7 +128,7 @@ the process is very similar to the process of initial setup exemplified before.
 HiDrive allows modification times to be set on objects accurate to 1 second.
 
 HiDrive supports [its own hash type](https://static.hidrive.com/dev/0001)
-which is used to verify the integrety of file contents after successful transfers.
+which is used to verify the integrity of file contents after successful transfers.
 
 ### Restricted filename characters
 
