@@ -33,7 +33,7 @@ The syncs would be incremental (on a file by file basis).
 
 e.g.
 
-    rclone sync -i drive:Folder s3:bucket
+    rclone sync --interactive drive:Folder s3:bucket
 
 
 ### Using rclone from multiple locations at the same time ###
@@ -42,8 +42,8 @@ You can use rclone from multiple places at the same time if you choose
 different subdirectory for the output, e.g.
 
 ```
-Server A> rclone sync -i /tmp/whatever remote:ServerA
-Server B> rclone sync -i /tmp/whatever remote:ServerB
+Server A> rclone sync --interactive /tmp/whatever remote:ServerA
+Server B> rclone sync --interactive /tmp/whatever remote:ServerB
 ```
 
 If you sync to the same directory then you should use rclone copy
@@ -190,9 +190,14 @@ If you are using `systemd-resolved` (default on Arch Linux), ensure it
 is at version 233 or higher. Previous releases contain a bug which
 causes not all domains to be resolved properly.
 
-Additionally with the `GODEBUG=netdns=` environment variable the Go
-resolver decision can be influenced. This also allows to resolve certain
-issues with DNS resolution. See the [name resolution section in the go docs](https://golang.org/pkg/net/#hdr-Name_Resolution).
+The Go resolver decision can be influenced with the `GODEBUG=netdns=...`
+environment variable. This also allows to resolve certain issues with
+DNS resolution. On Windows or MacOS systems, try forcing use of the
+internal Go resolver by setting `GODEBUG=netdns=go` at runtime. On
+other systems (Linux, \*BSD, etc) try forcing use of the system
+name resolver by setting `GODEBUG=netdns=cgo` (and recompile rclone
+from source with CGO enabled if necessary). See the
+[name resolution section in the go docs](https://golang.org/pkg/net/#hdr-Name_Resolution).
 
 ### The total size reported in the stats for a sync is wrong and keeps changing
 

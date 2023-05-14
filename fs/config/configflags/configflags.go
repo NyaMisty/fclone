@@ -71,6 +71,7 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &deleteDuring, "delete-during", "", false, "When synchronizing, delete files during transfer")
 	flags.BoolVarP(flagSet, &deleteAfter, "delete-after", "", false, "When synchronizing, delete files on destination after transferring (default)")
 	flags.Int64VarP(flagSet, &ci.MaxDelete, "max-delete", "", -1, "When synchronizing, limit the number of deletes")
+	flags.FVarP(flagSet, &ci.MaxDeleteSize, "max-delete-size", "", "When synchronizing, limit the total size of deletes")
 	flags.BoolVarP(flagSet, &ci.TrackRenames, "track-renames", "", ci.TrackRenames, "When synchronizing, track file renames and do a server-side move if possible")
 	flags.StringVarP(flagSet, &ci.TrackRenamesStrategy, "track-renames-strategy", "", ci.TrackRenamesStrategy, "Strategies to use when synchronizing using track-renames hash|modtime|leaf")
 	flags.IntVarP(flagSet, &ci.LowLevelRetries, "low-level-retries", "", ci.LowLevelRetries, "Number of low level retries to do")
@@ -120,7 +121,7 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &ci.ProgressTerminalTitle, "progress-terminal-title", "", ci.ProgressTerminalTitle, "Show progress on the terminal title (requires -P/--progress)")
 	flags.BoolVarP(flagSet, &ci.Cookie, "use-cookies", "", ci.Cookie, "Enable session cookiejar")
 	flags.BoolVarP(flagSet, &ci.UseMmap, "use-mmap", "", ci.UseMmap, "Use mmap allocator (see docs)")
-	flags.StringVarP(flagSet, &ci.CaCert, "ca-cert", "", ci.CaCert, "CA certificate used to verify servers")
+	flags.StringArrayVarP(flagSet, &ci.CaCert, "ca-cert", "", ci.CaCert, "CA certificate used to verify servers")
 	flags.StringVarP(flagSet, &ci.ClientCert, "client-cert", "", ci.ClientCert, "Client SSL certificate (PEM) for mutual TLS auth")
 	flags.StringVarP(flagSet, &ci.ClientKey, "client-key", "", ci.ClientKey, "Client SSL private key (PEM) for mutual TLS auth")
 	flags.FVarP(flagSet, &ci.MultiThreadCutoff, "multi-thread-cutoff", "", "Use multi-thread downloads for files above this size")
@@ -143,6 +144,8 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.BoolVarP(flagSet, &ci.Metadata, "metadata", "M", ci.Metadata, "If set, preserve metadata when copying objects")
 	flags.BoolVarP(flagSet, &ci.ServerSideAcrossConfigs, "server-side-across-configs", "", ci.ServerSideAcrossConfigs, "Allow server-side operations (e.g. copy) to work across different configs")
 	flags.FVarP(flagSet, &ci.TerminalColorMode, "color", "", "When to show colors (and other ANSI codes) AUTO|NEVER|ALWAYS")
+	flags.FVarP(flagSet, &ci.DefaultTime, "default-time", "", "Time to show if modtime is unknown for files and directories")
+	flags.BoolVarP(flagSet, &ci.Inplace, "inplace", "", ci.Inplace, "Download directly to destination file instead of atomic download to temp/rename")
 }
 
 // ParseHeaders converts the strings passed in via the header flags into HTTPOptions

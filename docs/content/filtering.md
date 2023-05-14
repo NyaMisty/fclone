@@ -166,7 +166,7 @@ Which will match a directory called `start` with a file called
 `end.jpg` in it as the `.*` will match `/` characters.
 
 Note that you can use `-vv --dump filters` to show the filter patterns
-in regexp format - rclone implements the glob patters by transforming
+in regexp format - rclone implements the glob patterns by transforming
 them into regular expressions.
 
 ## Filter pattern examples {#examples}
@@ -723,7 +723,7 @@ and `-v` first.
 In conjunction with `rclone sync`, `--delete-excluded` deletes any files
 on the destination which are excluded from the command.
 
-E.g. the scope of `rclone sync -i A: B:` can be restricted:
+E.g. the scope of `rclone sync --interactive A: B:` can be restricted:
 
     rclone --min-size 50k --delete-excluded sync A: B:
 

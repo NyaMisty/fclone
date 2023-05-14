@@ -334,7 +334,7 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.W
 		}
 		src := pair.Src
 		var err error
-		tr := accounting.Stats(s.ctx).NewCheckingTransfer(src)
+		tr := accounting.Stats(s.ctx).NewCheckingTransfer(src, "checking")
 		// Check to see if can store this
 		if src.Storable() {
 			needTransfer := operations.NeedTransfer(s.ctx, pair.Dst, pair.Src)
@@ -382,6 +382,14 @@ func (s *syncCopyMove) pairChecker(in *pipe, out *pipe, fraction int, wg *sync.W
 						fs.Logf(src, "Not removing source file as it is the same file as the destination")
 					} else if s.ci.IgnoreExisting {
 						fs.Debugf(src, "Not removing source file as destination file exists and --ignore-existing is set")
+					} else if s.checkFirst && s.ci.OrderBy != "" {
+						// If we want perfect ordering then use the transfers to delete the file
+						//
+						// We send src == dst, to say we want the src deleted
+						ok = out.Put(s.ctx, fs.ObjectPair{Src: src, Dst: src})
+						if !ok {
+							return
+						}
 					} else {
 						s.processError(operations.DeleteFile(s.ctx, src))
 					}
@@ -404,6 +412,7 @@ func (s *syncCopyMove) pairRenamer(in *pipe, out *pipe, fraction int, wg *sync.W
 		src := pair.Src
 		if !s.tryRename(src) {
 			// pass on if not renamed
+			fs.Debugf(src, "Need to transfer - No matching file found at Destination")
 			ok = out.Put(s.ctx, pair)
 			if !ok {
 				return
@@ -422,10 +431,16 @@ func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs,
 			return
 		}
 		src := pair.Src
+		dst := pair.Dst
 		if s.DoMove {
-			_, err = operations.Move(ctx, fdst, pair.Dst, src.Remote(), src)
+			if src != dst {
+				_, err = operations.Move(ctx, fdst, dst, src.Remote(), src)
+			} else {
+				// src == dst signals delete the src
+				err = operations.DeleteFile(ctx, src)
+			}
 		} else {
-			_, err = operations.Copy(ctx, fdst, pair.Dst, src.Remote(), src)
+			_, err = operations.Copy(ctx, fdst, dst, src.Remote(), src)
 		}
 		s.processError(err)
 	}
@@ -542,7 +557,7 @@ func (s *syncCopyMove) deleteFiles(checkSrcMap bool) error {
 	}
 
 	// Delete the spare files
-	toDelete := make(fs.ObjectsChan, s.ci.Transfers)
+	toDelete := make(fs.ObjectsChan, s.ci.Checkers)
 	go func() {
 	outer:
 		for remote, o := range s.dstFiles {
@@ -819,14 +834,14 @@ func (s *syncCopyMove) makeRenameMap() {
 	// now make a map of size,hash for all dstFiles
 	s.renameMap = make(map[string][]fs.Object)
 	var wg sync.WaitGroup
-	wg.Add(s.ci.Transfers)
-	for i := 0; i < s.ci.Transfers; i++ {
+	wg.Add(s.ci.Checkers)
+	for i := 0; i < s.ci.Checkers; i++ {
 		go func() {
 			defer wg.Done()
 			for obj := range in {
 				// only create hash for dst fs.Object if its size could match
 				if _, found := possibleSizes[obj.Size()]; found {
-					tr := accounting.Stats(s.ctx).NewCheckingTransfer(obj)
+					tr := accounting.Stats(s.ctx).NewCheckingTransfer(obj, "renaming")
 					hash := s.renameID(obj, s.trackRenamesStrategy, s.modifyWindow)
 
 					if hash != "" {
@@ -1069,6 +1084,7 @@ func (s *syncCopyMove) SrcOnly(src fs.DirEntry) (recurse bool) {
 			}
 			if !NoNeedTransfer {
 				// No need to check since doesn't exist
+				fs.Debugf(src, "Need to transfer - File not found at Destination")
 				ok := s.toBeUploaded.Put(s.ctx, fs.ObjectPair{Src: x, Dst: nil})
 				if !ok {
 					return

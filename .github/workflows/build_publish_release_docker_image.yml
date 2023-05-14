@@ -33,7 +33,7 @@ jobs:
                 dockerHubPassword: ${{ secrets.DOCKER_HUB_PASSWORD }}
 
     build_docker_volume_plugin:
-        if: github.repository == 'rclone/rclone'
+        #if: github.repository == 'rclone/rclone'
         needs: build
         runs-on: ubuntu-latest
         name: Build docker plugin job

@@ -47,13 +47,14 @@ type File struct {
 	o                fs.Object                       // NB o may be nil if file is being written
 	leaf             string                          // leaf name of the object
 	writers          []Handle                        // writers for this file
+	virtualModTime   *time.Time                      // modtime for backends with Precision == fs.ModTimeNotSupported
 	pendingModTime   time.Time                       // will be applied once o becomes available, i.e. after file was written
 	pendingRenameFun func(ctx context.Context) error // will be run/renamed after all writers close
 	sys              atomic.Value                    // user defined info to be attached here
 	nwriters         int32                           // len(writers) which is read/updated with atomic
 	appendMode       bool                            // file was opened with O_APPEND
 
-	messagedWrite    bool
+	messagedWrite bool
 }
 
 // newFile creates a new File
@@ -141,6 +142,13 @@ func (f *File) Inode() uint64 {
 // Node returns the Node associated with this - satisfies Noder interface
 func (f *File) Node() Node {
 	return f
+}
+
+// renameDir - call when parent directory has been renamed
+func (f *File) renameDir(dPath string) {
+	f.mu.RLock()
+	f.dPath = dPath
+	f.mu.RUnlock()
 }
 
 // applyPendingRename runs a previously set rename operation if there are no
@@ -298,6 +306,9 @@ func (f *File) activeWriters() int {
 // It should be called with the lock held
 func (f *File) _roundModTime(modTime time.Time) time.Time {
 	precision := f.d.f.Precision()
+	if precision == fs.ModTimeNotSupported {
+		return modTime
+	}
 	return modTime.Truncate(precision)
 }
 
@@ -306,8 +317,19 @@ func (f *File) _roundModTime(modTime time.Time) time.Time {
 // if NoModTime is set then it returns the mod time of the directory
 func (f *File) ModTime() (modTime time.Time) {
 	f.mu.RLock()
-	d, o, pendingModTime := f.d, f.o, f.pendingModTime
+	d, o, pendingModTime, virtualModTime := f.d, f.o, f.pendingModTime, f.virtualModTime
 	f.mu.RUnlock()
+
+	// Set the virtual modtime up for backends which don't support setting modtime
+	//
+	// Note that we only cache modtime values that we have returned to the OS
+	// if we haven't returned a value to the OS then we can change it
+	defer func() {
+		if f.d.f.Precision() == fs.ModTimeNotSupported && (virtualModTime == nil || !virtualModTime.Equal(modTime)) {
+			f.virtualModTime = &modTime
+			fs.Debugf(f._path(), "Set virtual modtime to %v", f.virtualModTime)
+		}
+	}()
 
 	if d.vfs.Opt.NoModTime {
 		return d.ModTime()
@@ -325,6 +347,10 @@ func (f *File) ModTime() (modTime time.Time) {
 	}
 	if !pendingModTime.IsZero() {
 		return f._roundModTime(pendingModTime)
+	}
+	if virtualModTime != nil && !virtualModTime.IsZero() {
+		fs.Debugf(f._path(), "Returning virtual modtime %v", f.virtualModTime)
+		return f._roundModTime(*virtualModTime)
 	}
 	if o == nil {
 		return time.Now()
@@ -469,6 +495,8 @@ func (f *File) setObject(o fs.Object) {
 func (f *File) setObjectNoUpdate(o fs.Object) {
 	f.mu.Lock()
 	f.o = o
+	f.virtualModTime = nil
+	fs.Debugf(f._path(), "Reset virtual modtime")
 	f.mu.Unlock()
 }
 
@@ -601,10 +629,6 @@ func (f *File) Remove() (err error) {
 		wasWriting = d.vfs.cache.Remove(f.Path())
 	}
 
-	// Remove the item from the directory listing
-	// called with File.mu released
-	d.delObject(f.Name())
-
 	f.muRW.Lock() // muRW must be locked before mu to avoid
 	f.mu.Lock()   // deadlock in RWFileHandle.openPending and .close
 	if f.o != nil {
@@ -620,6 +644,12 @@ func (f *File) Remove() (err error) {
 		} else {
 			fs.Debugf(f._path(), "File.Remove file error: %v", err)
 		}
+	}
+
+	// Remove the item from the directory listing
+	// called with File.mu released when there is no error removing the underlying file
+	if err == nil {
+		d.delObject(f.Name())
 	}
 	return err
 }

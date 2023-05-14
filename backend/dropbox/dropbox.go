@@ -260,8 +260,8 @@ uploaded.
 The default for this is 0 which means rclone will choose a sensible
 default based on the batch_mode in use.
 
-- batch_mode: async - default batch_timeout is 500ms
-- batch_mode: sync - default batch_timeout is 10s
+- batch_mode: async - default batch_timeout is 10s
+- batch_mode: sync - default batch_timeout is 500ms
 - batch_mode: off - not in use
 `,
 			Default:  fs.Duration(0),
@@ -536,7 +536,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 			default:
 				return nil, err
 			}
-			// if the moint failed we have to abort here
+			// if the mount failed we have to abort here
 		}
 		// if the mount succeeded it's now a normal folder in the users root namespace
 		// we disable shared folder mode and proceed normally
@@ -719,7 +719,7 @@ func (f *Fs) listSharedFolders(ctx context.Context) (entries fs.DirEntries, err 
 		}
 		for _, entry := range res.Entries {
 			leaf := f.opt.Enc.ToStandardName(entry.Name)
-			d := fs.NewDir(leaf, time.Now()).SetID(entry.SharedFolderId)
+			d := fs.NewDir(leaf, time.Time{}).SetID(entry.SharedFolderId)
 			entries = append(entries, d)
 			if err != nil {
 				return nil, err
@@ -906,7 +906,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 			leaf := f.opt.Enc.ToStandardName(path.Base(entryPath))
 			remote := path.Join(dir, leaf)
 			if folderInfo != nil {
-				d := fs.NewDir(remote, time.Now()).SetID(folderInfo.Id)
+				d := fs.NewDir(remote, time.Time{}).SetID(folderInfo.Id)
 				entries = append(entries, d)
 			} else if fileInfo != nil {
 				o, err := f.newObjectWithInfo(ctx, remote, fileInfo)

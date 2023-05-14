@@ -121,6 +121,7 @@ WebDAV or S3, that work out of the box.)
 {{< provider name="Dreamhost" home="https://www.dreamhost.com/cloud/storage/" config="/s3/#dreamhost" >}}
 {{< provider name="Dropbox" home="https://www.dropbox.com/" config="/dropbox/" >}}
 {{< provider name="Enterprise File Fabric" home="https://storagemadeeasy.com/about/" config="/filefabric/" >}}
+{{< provider name="Fastmail Files" home="https://www.fastmail.com/" config="/webdav/#fastmail-files" >}}
 {{< provider name="FTP" home="https://en.wikipedia.org/wiki/File_Transfer_Protocol" config="/ftp/" >}}
 {{< provider name="Google Cloud Storage" home="https://cloud.google.com/storage/" config="/googlecloudstorage/" >}}
 {{< provider name="Google Drive" home="https://www.google.com/drive/" config="/drive/" >}}
@@ -132,7 +133,7 @@ WebDAV or S3, that work out of the box.)
 {{< provider name="Internet Archive" home="https://archive.org/" config="/internetarchive/" >}}
 {{< provider name="Jottacloud" home="https://www.jottacloud.com/en/" config="/jottacloud/" >}}
 {{< provider name="IBM COS S3" home="http://www.ibm.com/cloud/object-storage" config="/s3/#ibm-cos-s3" >}}
-{{< provider name="IDrive e2" home="https://www.idrive.com/e2/" config="/s3/#idrive-e2" >}}
+{{< provider name="IDrive e2" home="https://www.idrive.com/e2/?refer=rclone" config="/s3/#idrive-e2" >}}
 {{< provider name="IONOS Cloud" home="https://cloud.ionos.com/storage/object-storage" config="/s3/#ionos" >}}
 {{< provider name="Koofr" home="https://koofr.eu/" config="/koofr/" >}}
 {{< provider name="Liara Object Storage" home="https://liara.ir/landing/object-storage" config="/s3/#liara-object-storage" >}}
@@ -151,6 +152,8 @@ WebDAV or S3, that work out of the box.)
 {{< provider name="Oracle Object Storage" home="https://www.oracle.com/cloud/storage/object-storage" config="/oracleobjectstorage/" >}}
 {{< provider name="ownCloud" home="https://owncloud.org/" config="/webdav/#owncloud" >}}
 {{< provider name="pCloud" home="https://www.pcloud.com/" config="/pcloud/" >}}
+{{< provider name="Petabox" home="https://petabox.io/" config="/s3/#petabox" >}}
+{{< provider name="PikPak" home="https://mypikpak.com/" config="/pikpak/" >}}
 {{< provider name="premiumize.me" home="https://premiumize.me/" config="/premiumizeme/" >}}
 {{< provider name="put.io" home="https://put.io/" config="/putio/" >}}
 {{< provider name="QingStor" home="https://www.qingcloud.com/products/storage" config="/qingstor/" >}}

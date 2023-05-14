@@ -48,6 +48,7 @@ type Options struct {
 	DaemonTimeout      time.Duration // OSXFUSE only
 	AsyncRead          bool
 	NetworkMode        bool // Windows only
+	CaseInsensitive    fs.Tristate
 }
 
 // DefaultOpt is the default values for creating the mount
@@ -139,6 +140,7 @@ func AddFlags(flagSet *pflag.FlagSet) {
 	flags.FVarP(flagSet, &Opt.MaxReadAhead, "max-read-ahead", "", "The number of bytes that can be prefetched for sequential reads (not supported on Windows)")
 	flags.BoolVarP(flagSet, &Opt.WritebackCache, "write-back-cache", "", Opt.WritebackCache, "Makes kernel buffer writes before sending them to rclone (without this, writethrough caching is used) (not supported on Windows)")
 	flags.StringVarP(flagSet, &Opt.DeviceName, "devname", "", Opt.DeviceName, "Set the device name - default is remote:path")
+	flags.FVarP(flagSet, &Opt.CaseInsensitive, "mount-case-insensitive", "", "Tell the OS the mount is case insensitive (true) or sensitive (false) regardless of the backend (auto)")
 	// Windows and OSX
 	flags.StringVarP(flagSet, &Opt.VolumeName, "volname", "", Opt.VolumeName, "Set the volume name (supported on Windows and OSX only)")
 	// OSX only
@@ -237,13 +239,8 @@ func NewMountCommand(commandName string, hidden bool, mount MountFn) *cobra.Comm
 
 // Mount the remote at mountpoint
 func (m *MountPoint) Mount() (daemon *os.Process, err error) {
-	if err = m.CheckOverlap(); err != nil {
-		return nil, err
-	}
 
-	if err = m.CheckAllowed(); err != nil {
-		return nil, err
-	}
+	// Ensure sensible defaults
 	m.SetVolumeName(m.MountOpt.VolumeName)
 	m.SetDeviceName(m.MountOpt.DeviceName)
 

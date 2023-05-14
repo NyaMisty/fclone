@@ -1038,7 +1038,7 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 		}
 		fs.Debugf(dir, "list: remove entry: %v", entryRemote)
 	}
-	entries = nil
+	entries = nil //nolint:ineffassign
 
 	// and then iterate over the ones from source (temp Objects will override source ones)
 	var batchDirectories []*Directory
@@ -1787,7 +1787,7 @@ func (f *Fs) CleanUpCache(ignoreLastTs bool) {
 	}
 }
 
-// StopBackgroundRunners will signall all the runners to stop their work
+// StopBackgroundRunners will signal all the runners to stop their work
 // can be triggered from a terminate signal or from testing between runs
 func (f *Fs) StopBackgroundRunners() {
 	f.cleanupChan <- false

@@ -75,6 +75,9 @@ func (d *Dir) String() string {
 }
 
 // Dumps the directory tree to the string builder with the given indent
+//
+//lint:ignore U1000 false positive when running staticcheck,
+//nolint:unused // Don't include unused when running golangci-lint
 func (d *Dir) dumpIndent(out *strings.Builder, indent string) {
 	if d == nil {
 		fmt.Fprintf(out, "%s<nil *Dir>\n", indent)
@@ -109,6 +112,9 @@ func (d *Dir) dumpIndent(out *strings.Builder, indent string) {
 }
 
 // Dumps a nicely formatted directory tree to a string
+//
+//lint:ignore U1000 false positive when running staticcheck,
+//nolint:unused // Don't include unused when running golangci-lint
 func (d *Dir) dump() string {
 	var out strings.Builder
 	d.dumpIndent(&out, "")
@@ -325,10 +331,15 @@ func (d *Dir) renameTree(dirPath string) {
 		d.entry = fs.NewDirCopy(context.TODO(), d.entry).SetRemote(dirPath)
 	}
 
-	// Do the same to any child directories
+	// Do the same to any child directories and files
 	for leaf, node := range d.items {
-		if dir, ok := node.(*Dir); ok {
-			dir.renameTree(path.Join(dirPath, leaf))
+		switch x := node.(type) {
+		case *Dir:
+			x.renameTree(path.Join(dirPath, leaf))
+		case *File:
+			x.renameDir(dirPath)
+		default:
+			panic("bad dir entry")
 		}
 	}
 }

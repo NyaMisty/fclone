@@ -260,6 +260,66 @@ At the time of writing this only works with OneDrive personal paid accounts.
 `,
 			Advanced: true,
 		}, {
+			Name:    "hash_type",
+			Default: "auto",
+			Help: `Specify the hash in use for the backend.
+
+This specifies the hash type in use. If set to "auto" it will use the
+default hash which is QuickXorHash.
+
+Before rclone 1.62 an SHA1 hash was used by default for Onedrive
+Personal. For 1.62 and later the default is to use a QuickXorHash for
+all onedrive types. If an SHA1 hash is desired then set this option
+accordingly.
+
+From July 2023 QuickXorHash will be the only available hash for
+both OneDrive for Business and OneDriver Personal.
+
+This can be set to "none" to not use any hashes.
+
+If the hash requested does not exist on the object, it will be
+returned as an empty string which is treated as a missing hash by
+rclone.
+`,
+			Examples: []fs.OptionExample{{
+				Value: "auto",
+				Help:  "Rclone chooses the best hash",
+			}, {
+				Value: "quickxor",
+				Help:  "QuickXor",
+			}, {
+				Value: "sha1",
+				Help:  "SHA1",
+			}, {
+				Value: "sha256",
+				Help:  "SHA256",
+			}, {
+				Value: "crc32",
+				Help:  "CRC32",
+			}, {
+				Value: "none",
+				Help:  "None - don't use any hashes",
+			}},
+			Advanced: true,
+		}, {
+			Name:    "av_override",
+			Default: false,
+			Help: `Allows download of files the server thinks has a virus.
+
+The onedrive/sharepoint server may check files uploaded with an Anti
+Virus checker. If it detects any potential viruses or malware it will
+block download of the file.
+
+In this case you will see a message like this
+
+    server reports this file is infected with a virus - use --onedrive-av-override to download anyway: Infected (name of virus): 403 Forbidden: 
+
+If you are 100% sure you want to download this file anyway then use
+the --onedrive-av-override flag, or av_override = true in the config
+file.
+`,
+			Advanced: true,
+		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -511,7 +571,7 @@ Example: "https://contoso.sharepoint.com/sites/mysite" or "mysite"
 `)
 	case "url_end":
 		siteURL := config.Result
-		re := regexp.MustCompile(`https://.*\.sharepoint.com/sites/(.*)`)
+		re := regexp.MustCompile(`https://.*\.sharepoint\.com/sites/(.*)`)
 		match := re.FindStringSubmatch(siteURL)
 		if len(match) == 2 {
 			return chooseDrive(ctx, name, m, srv, chooseDriveOpt{
@@ -597,6 +657,8 @@ type Options struct {
 	LinkScope               string               `config:"link_scope"`
 	LinkType                string               `config:"link_type"`
 	LinkPassword            string               `config:"link_password"`
+	HashType                string               `config:"hash_type"`
+	AVOverride              bool                 `config:"av_override"`
 	Enc                     encoder.MultiEncoder `config:"encoding"`
 }
 
@@ -613,6 +675,7 @@ type Fs struct {
 	tokenRenewer *oauthutil.Renew   // renew the token on expiry
 	driveID      string             // ID to use for querying Microsoft Graph
 	driveType    string             // https://developer.microsoft.com/en-us/graph/docs/api-reference/v1.0/resources/drive
+	hashType     hash.Type          // type of the hash we are using
 }
 
 // Object describes a OneDrive object
@@ -626,8 +689,7 @@ type Object struct {
 	size          int64     // size of the object
 	modTime       time.Time // modification time of the object
 	id            string    // ID of the object
-	sha1          string    // SHA-1 of the object content
-	quickxorhash  string    // QuickXorHash of the object content
+	hash          string    // Hash of the content, usually QuickXorHash but set as hash_type
 	mimeType      string    // Content-Type of object from server (may not be as uploaded)
 }
 
@@ -882,6 +944,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		driveType: opt.DriveType,
 		srv:       rest.NewClient(oAuthClient).SetRoot(rootURL),
 		pacer:     fs.NewPacer(ctx, pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
+		hashType:  QuickXorHashType,
 	}
 	f.features = (&fs.Features{
 		CaseInsensitive:         true,
@@ -890,6 +953,15 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		ServerSideAcrossConfigs: opt.ServerSideAcrossConfigs,
 	}).Fill(ctx, f)
 	f.srv.SetErrorHandler(errorHandler)
+
+	// Set the user defined hash
+	if opt.HashType == "auto" || opt.HashType == "" {
+		opt.HashType = QuickXorHashType.String()
+	}
+	err = f.hashType.Set(opt.HashType)
+	if err != nil {
+		return nil, err
+	}
 
 	// Disable change polling in China region
 	// See: https://github.com/rclone/rclone/issues/6444
@@ -1556,10 +1628,7 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 
 // Hashes returns the supported hash sets.
 func (f *Fs) Hashes() hash.Set {
-	if f.driveType == driveTypePersonal {
-		return hash.Set(hash.SHA1)
-	}
-	return hash.Set(QuickXorHashType)
+	return hash.Set(f.hashType)
 }
 
 // PublicLink returns a link for downloading without account.
@@ -1674,6 +1743,10 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 	token := make(chan struct{}, f.ci.Checkers)
 	var wg sync.WaitGroup
 	err := walk.Walk(ctx, f, "", true, -1, func(path string, entries fs.DirEntries, err error) error {
+		if err != nil {
+			fs.Errorf(f, "Failed to list %q: %v", path, err)
+			return nil
+		}
 		err = entries.ForObjectError(func(obj fs.Object) error {
 			o, ok := obj.(*Object)
 			if !ok {
@@ -1768,14 +1841,8 @@ func (o *Object) rootPath() string {
 
 // Hash returns the SHA-1 of an object returning a lowercase hex string
 func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
-	if o.fs.driveType == driveTypePersonal {
-		if t == hash.SHA1 {
-			return o.sha1, nil
-		}
-	} else {
-		if t == QuickXorHashType {
-			return o.quickxorhash, nil
-		}
+	if t == o.fs.hashType {
+		return o.hash, nil
 	}
 	return "", hash.ErrUnsupported
 }
@@ -1806,16 +1873,23 @@ func (o *Object) setMetaData(info *api.Item) (err error) {
 	file := info.GetFile()
 	if file != nil {
 		o.mimeType = file.MimeType
-		if file.Hashes.Sha1Hash != "" {
-			o.sha1 = strings.ToLower(file.Hashes.Sha1Hash)
-		}
-		if file.Hashes.QuickXorHash != "" {
-			h, err := base64.StdEncoding.DecodeString(file.Hashes.QuickXorHash)
-			if err != nil {
-				fs.Errorf(o, "Failed to decode QuickXorHash %q: %v", file.Hashes.QuickXorHash, err)
-			} else {
-				o.quickxorhash = hex.EncodeToString(h)
+		o.hash = ""
+		switch o.fs.hashType {
+		case QuickXorHashType:
+			if file.Hashes.QuickXorHash != "" {
+				h, err := base64.StdEncoding.DecodeString(file.Hashes.QuickXorHash)
+				if err != nil {
+					fs.Errorf(o, "Failed to decode QuickXorHash %q: %v", file.Hashes.QuickXorHash, err)
+				} else {
+					o.hash = hex.EncodeToString(h)
+				}
 			}
+		case hash.SHA1:
+			o.hash = strings.ToLower(file.Hashes.Sha1Hash)
+		case hash.SHA256:
+			o.hash = strings.ToLower(file.Hashes.Sha256Hash)
+		case hash.CRC32:
+			o.hash = strings.ToLower(file.Hashes.Crc32Hash)
 		}
 	}
 	fileSystemInfo := info.GetFileSystemInfo()
@@ -1911,12 +1985,20 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	var resp *http.Response
 	opts := o.fs.newOptsCall(o.id, "GET", "/content")
 	opts.Options = options
+	if o.fs.opt.AVOverride {
+		opts.Parameters = url.Values{"AVOverride": {"1"}}
+	}
 
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
+		if resp != nil {
+			if virus := resp.Header.Get("X-Virus-Infected"); virus != "" {
+				err = fmt.Errorf("server reports this file is infected with a virus - use --onedrive-av-override to download anyway: %s: %w", virus, err)
+			}
+		}
 		return nil, err
 	}
 

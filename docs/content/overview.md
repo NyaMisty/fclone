@@ -39,11 +39,12 @@ Here is an overview of the major features of each cloud storage system.
 | Mega                         | -                | -       | No               | Yes             | -         | -        |
 | Memory                       | MD5              | R/W     | No               | No              | -         | -        |
 | Microsoft Azure Blob Storage | MD5              | R/W     | No               | No              | R/W       | -        |
-| Microsoft OneDrive           | SHA1 ⁵           | R/W     | Yes              | No              | R         | -        |
+| Microsoft OneDrive           | QuickXorHash ⁵   | R/W     | Yes              | No              | R         | -        |
 | OpenDrive                    | MD5              | R/W     | Yes              | Partial ⁸       | -         | -        |
 | OpenStack Swift              | MD5              | R/W     | No               | No              | R/W       | -        |
 | Oracle Object Storage        | MD5              | R/W     | No               | No              | R/W       | -        |
 | pCloud                       | MD5, SHA1 ⁷      | R       | No               | No              | W         | -        |
+| PikPak                       | MD5              | R       | No               | No              | R         | -        |
 | premiumize.me                | -                | -       | Yes              | No              | R         | -        |
 | put.io                       | CRC-32           | R/W     | No               | Yes             | R         | -        |
 | QingStor                     | MD5              | - ⁹     | No               | No              | R/W       | -        |
@@ -68,13 +69,11 @@ This is an SHA256 sum of all the 4 MiB block SHA256s.
 ² SFTP supports checksums if the same login has shell access and
 `md5sum` or `sha1sum` as well as `echo` are in the remote's PATH.
 
-³ WebDAV supports hashes when used with Owncloud and Nextcloud only.
+³ WebDAV supports hashes when used with Fastmail Files. Owncloud and Nextcloud only.
 
-⁴ WebDAV supports modtimes when used with Owncloud and Nextcloud only.
+⁴ WebDAV supports modtimes when used with Fastmail Files, Owncloud and Nextcloud only.
 
-⁵ Microsoft OneDrive Personal supports SHA1 hashes, whereas OneDrive
-for business and SharePoint server support Microsoft's own
-[QuickXorHash](https://docs.microsoft.com/en-us/onedrive/developer/code-snippets/quickxorhash).
+⁵ [QuickXorHash](https://docs.microsoft.com/en-us/onedrive/developer/code-snippets/quickxorhash) is Microsoft's own hash.
 
 ⁶ Mail.ru uses its own modified SHA1 hash
 
@@ -496,6 +495,7 @@ upon backend-specific capabilities.
 | OpenStack Swift              | Yes † | Yes  | No   | No      | No      | Yes   | Yes          | No           | Yes   | No       |
 | Oracle Object Storage        | No    | Yes  | No   | No      | Yes     | Yes   | Yes          | No           | No    | No       |
 | pCloud                       | Yes   | Yes  | Yes  | Yes     | Yes     | No    | No           | Yes          | Yes   | Yes      |
+| PikPak                       | Yes   | Yes  | Yes  | Yes     | Yes     | No    | No           | Yes          | Yes   | Yes      |
 | premiumize.me                | Yes   | No   | Yes  | Yes     | No      | No    | No           | Yes          | Yes   | Yes      |
 | put.io                       | Yes   | No   | Yes  | Yes     | Yes     | No    | Yes          | No           | Yes   | Yes      |
 | QingStor                     | No    | Yes  | No   | No      | Yes     | Yes   | No           | No           | No    | No       |
@@ -504,7 +504,7 @@ upon backend-specific capabilities.
 | Sia                          | No    | No   | No   | No      | No      | No    | Yes          | No           | No    | Yes      |
 | SMB                          | No    | No   | Yes  | Yes     | No      | No    | Yes          | No           | No    | Yes      |
 | SugarSync                    | Yes   | Yes  | Yes  | Yes     | No      | No    | Yes          | Yes          | No    | Yes      |
-| Storj                        | Yes † | Yes  | Yes  | No      | No      | Yes   | Yes          | No           | No    | No       |
+| Storj                        | Yes ☨ | Yes  | Yes  | No      | No      | Yes   | Yes          | Yes          | No    | No       |
 | Uptobox                      | No    | Yes  | Yes  | Yes     | No      | No    | No           | No           | No    | No       |
 | WebDAV                       | Yes   | Yes  | Yes  | Yes     | No      | No    | Yes ‡        | No           | Yes   | Yes      |
 | Yandex Disk                  | Yes   | Yes  | Yes  | Yes     | Yes     | No    | Yes          | Yes          | Yes   | Yes      |
@@ -516,9 +516,12 @@ upon backend-specific capabilities.
 This deletes a directory quicker than just deleting all the files in
 the directory.
 
-† Note Swift and Storj implement this in order to delete
-directory markers but they don't actually have a quicker way of deleting
-files other than deleting them individually.
+† Note Swift implements this in order to delete directory markers but
+they don't actually have a quicker way of deleting files other than
+deleting them individually.
+
+☨ Storj implements this efficiently only for entire buckets. If
+purging a directory inside a bucket, files are deleted individually.
 
 ‡ StreamUpload is not supported with Nextcloud
 

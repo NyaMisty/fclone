@@ -67,7 +67,7 @@ List the contents of a container
 Sync `/home/local/directory` to the remote container, deleting any excess
 files in the container.
 
-    rclone sync -i /home/local/directory remote:container
+    rclone sync --interactive /home/local/directory remote:container
 
 ### --fast-list
 
@@ -162,6 +162,12 @@ It reads configuration from these variables, in the following order:
     - `AZURE_CLIENT_ID`: client ID of the application the user will authenticate to
     - `AZURE_USERNAME`: a username (usually an email address)
     - `AZURE_PASSWORD`: the user's password
+4. Workload Identity
+    - `AZURE_TENANT_ID`: Tenant to authenticate in.
+    - `AZURE_CLIENT_ID`: Client ID of the application the user will authenticate to.
+    - `AZURE_FEDERATED_TOKEN_FILE`: Path to projected service account token file.
+    - `AZURE_AUTHORITY_HOST`: Authority of an Azure Active Directory endpoint (default: login.microsoftonline.com).
+
 
 ##### Env Auth: 2. Managed Service Identity Credentials
 
@@ -189,7 +195,7 @@ Then you could access rclone resources like this:
 
 Or
 
-    rclone lsf --azureblob-env-auth --azureblob-acccount=ACCOUNT :azureblob:CONTAINER
+    rclone lsf --azureblob-env-auth --azureblob-account=ACCOUNT :azureblob:CONTAINER
 
 Which is analogous to using the `az` tool:
 
