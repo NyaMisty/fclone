@@ -1,4 +1,10 @@
 name: Scheduled Merge Remote Action
+
+env:
+  UPSTREAM: https://github.com/rclone/rclone
+  UPSTREAM_BRANCH: master
+  LOCAL_BRANCH: master
+
 on: 
   schedule:
     - cron: '0 14 * * *'
@@ -18,25 +24,53 @@ jobs:
         run: |
           git config --global user.email "misty@misty.moe"
           git config --global user.name "NyaMisty"
-      - name: Merge Upstream
+      - name: Merge Upstream By Merge
+        id: merge
         run: |
-          set +x
-          git remote add -f upstream "https://github.com/rclone/rclone" &&
+          set -x
+          git remote add -f upstream ${{ env.UPSTREAM }} &&
           git remote -v &&
           git branch --all &&
           git config --list &&
           git checkout master
           echo "Upstream log: "
-          git log --graph --oneline upstream/master | head -n 30
+          git log --graph --oneline upstream/${{ env.UPSTREAM_BRANCH }} | head -n 30
           echo "Our log: "
-          git log --graph --oneline master | head -n 10
-          echo "Merge fork point: $(git merge-base --fork-point master upstream/master)"
-          git merge upstream/master -m "AutoMerge-$(date '+%Y%m%d-%H%M%S')"
-          git merge --abort || true;
-          echo "After Rebase:"
-          git log --graph --oneline master | head -n 30
-          echo "Re-tagging master!"
-          git checkout $(git rev-parse HEAD); git branch -f master HEAD; git checkout master
+          git log --graph --oneline ${{ env.LOCAL_BRANCH }} | head -n 10
+
+          LAST_MSG=$(git log -1 --pretty=%B)
+          ORIGINAL_HEAD=$(git rev-parse HEAD)
+
+          git merge --no-commit --no-ff upstream/${{ env.UPSTREAM_BRANCH }}
+          if [ ! -n "$(git status --porcelain)" ]; then
+            # no changes, no work
+            echo "No new commits in upstream, finishing..."
+            echo "updated=0" >> $GITHUB_OUTPUT
+            exit 0
+          else
+            echo "New commits arrived!"
+            echo "updated=1" >> $GITHUB_OUTPUT
+          fi
+
+          #if [[ "$LAST_MSG" =~ ^AutoMerge-[0-9\-_]+$ ]]; then
+          if [[ $LAST_MSG =~ ^AutoMerge-.* ]]; then
+            echo "Last commit was AutoMerge, drop it"
+            git reset HEAD~1
+          fi
+
+          echo "Cleaning up and Doing REAL Merging!"
+          git reset --hard && git clean -fd
+          echo "Merge fork point: $(git merge-base --fork-point upstream/${{ env.UPSTREAM_BRANCH }} ${{ env.LOCAL_BRANCH }})"
+          echo "Merge fork point: $(git merge-base --fork-point ${{ env.LOCAL_BRANCH }} upstream/${{ env.UPSTREAM_BRANCH }})"
+          if git merge upstream/${{ env.UPSTREAM_BRANCH }} -m "AutoMerge-$(date '+%Y%m%d-%H%M%S')"; then
+            echo "Merge SUCCESSFUL! New log graph:"
+            git log --graph --oneline ${{ env.LOCAL_BRANCH }} | head -n 30
+          else
+            echo "Merge FAILED!"
+            git diff
+            echo "Cleanup!"
+            git reset --hard ORIGINAL_HEAD; git clean -fd
+          fi
       #- name: Prepare to push  
       #  run: git branch -f master
       - name: Push changes
