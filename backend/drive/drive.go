@@ -639,6 +639,7 @@ type Options struct {
 	ServiceAccountMinSleep    fs.Duration          `config:"service_account_min_sleep"` // Mod
 	ServicesPreload           int                  `config:"services_preload"`          // Mod
 	ServicesMax               int                  `config:"services_max"`              // Mod
+	UploadHelperTeamDrive     string               `config:"upload_helper_team_drive"`  // Mod
 	ServiceAccountCredentials string               `config:"service_account_credentials"`
 	TeamDriveID               string               `config:"team_drive"`
 	AuthOwnerOnly             bool                 `config:"auth_owner_only"`
@@ -700,8 +701,9 @@ type Fs struct {
 	listRempties     map[string]struct{} // IDs of supposedly empty directories which triggered grouping disable
 
 	ServiceAccountFiles map[string]int
-	serviceAccountMutex sync.Mutex
-	serviceAccountPool  *ServiceAccountPool
+	serviceAccountMutex sync.Mutex // Mod
+	serviceAccountPool  *ServiceAccountPool // Mod
+	uploadHelperTDPool  *UploadHelperTDPool // Mod
 	minChangeSAInterval time.Duration
 	lastChangeSATime    time.Time
 	FileObj             *fs.Object
@@ -919,6 +921,42 @@ func createDriveService(ctx context.Context, opt *Options, file string) (svc Ser
 	}
 	return
 }
+
+type UploadHelperTDPool struct {
+	ctx   context.Context
+	TeamDriveIDs []string // teamdrive id
+	mu    *sync.Mutex
+}
+
+func newUploadHelperTDPool(ctx context.Context) *UploadHelperTDPool {
+	p := &UploadHelperTDPool{
+		ctx:   ctx,
+		TeamDriveIDs: make([]string, 0),
+		mu:    new(sync.Mutex),
+	}
+	return p
+}
+
+func (p *UploadHelperTDPool) Load(opt *Options) (error) {
+	if opt.UploadHelperTeamDrive != "" {
+		p.TeamDriveIDs = strings.Split(opt.UploadHelperTeamDrive, ",")
+		splitPoint := rand.Intn(len(p.TeamDriveIDs))
+		p.TeamDriveIDs = append(p.TeamDriveIDs[splitPoint:],p.TeamDriveIDs[:splitPoint]...)
+	} else {
+		return fmt.Errorf("no helper td given")
+	}
+	return nil
+}
+
+func (p *UploadHelperTDPool) GetTD() (string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	teamDrive := p.TeamDriveIDs[0]
+	p.TeamDriveIDs = append(p.TeamDriveIDs[1:], p.TeamDriveIDs[0])
+	return teamDrive
+}
+
 
 // ------------------------------------------------------------
 
@@ -1458,6 +1496,13 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 			fs.Debugf(nil, "Assigned Service Account File to %s", file)
 		}
 	}
+	tdpool := newUploadHelperTDPool(ctx)
+	if err := tdpool.Load(opt); err != nil {
+		fs.Debugf(nil, "Cannot Init TeamDrive Pool: %v", err)
+		tdpool = nil
+	} else {
+		fs.Debugf(nil, "Loaded TeamDrive Pool with %d TD", len(tdpool.TeamDriveIDs))
+	}
 
 	oAuthClient, err := createOAuthClient(ctx, opt, name, m)
 	if err != nil {
@@ -1483,6 +1528,7 @@ func newFs(ctx context.Context, name, path string, m configmap.Mapper) (*Fs, err
 		dirResourceKeys: new(sync.Map),
 
 		serviceAccountPool: pool,
+		uploadHelperTDPool: tdpool,
 	}
 	f.isTeamDrive = opt.TeamDriveID != ""
 	f.fileFields = f.getFileFields()
@@ -2773,6 +2819,35 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 		if err != nil {
 			return nil, err
 		}
+	} else if f.uploadHelperTDPool != nil {
+		// Creates new file in helperTD -> Upload -> Move new file to target
+		tmpFileName := fmt.Sprintf("%s-%s", time.Now().Format("20060102-150405"), uuid.NewString())
+		tmpDriveID := f.uploadHelperTDPool.GetTD()
+		fs.Debugf(f, "Uploading to helper file: %s:/%s", tmpDriveID, tmpFileName)
+		tmpFileCreateInfo := &drive.File{
+			Name:   	  tmpFileName,
+			Description:  tmpFileName,
+			Parents:      []string{tmpDriveID},
+			ModifiedTime: modTime.Format(timeFormatOut),
+		}
+		info, err := f.Upload(ctx, in, size, srcMimeType, "", remote, tmpFileCreateInfo)
+		if err != nil {
+			return nil, err
+		}
+		tmpFileObj, err := f.newObjectWithInfo(ctx, remote, info)
+		if err != nil {
+			return nil, err
+		}
+		fs.Debugf(f, "Moving helper file to %s", remote)
+		finalObj, err := f.Copy(ctx, tmpFileObj, remote)
+		if err != nil {
+			return nil, err
+		}
+		deleteErr := f.delete(ctx, info.Id, false)
+		if deleteErr != nil {
+			fs.Debugf("Cannot delete tmp upload file %s/%s: %v", tmpDriveID, info.Id, deleteErr)
+		}
+		return finalObj, nil
 	} else {
 		// Upload the file in chunks
 		info, err = f.Upload(ctx, in, size, srcMimeType, "", remote, createInfo)
