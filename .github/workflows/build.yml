@@ -388,7 +388,7 @@ jobs:
       run: |
         mkdir -p rclonebuild_down
     - name: "Download all artifacts"
-      uses: actions/download-artifact@v2
+      uses: actions/download-artifact@v3
       with:
         path: rclonebuild_down
     - name: "Rearrange artifacts"
