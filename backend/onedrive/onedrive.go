@@ -676,6 +676,8 @@ type Fs struct {
 	driveID      string             // ID to use for querying Microsoft Graph
 	driveType    string             // https://developer.microsoft.com/en-us/graph/docs/api-reference/v1.0/resources/drive
 	hashType     hash.Type          // type of the hash we are using
+
+	downloadURLCache *sync.Map // Mod: cache direct download link
 }
 
 // Object describes a OneDrive object
@@ -1972,6 +1974,34 @@ func (o *Object) Storable() bool {
 	return true
 }
 
+type downURLCacheEntry struct {
+	URL        string
+	ExpireTime time.Time
+}
+
+func (f *Fs) getDownloadLink(ctx context.Context, id string) (downurl string, ok bool) {
+	if f.downloadURLCache == nil {
+		f.downloadURLCache = &sync.Map{}
+	}
+	if v, ok := f.downloadURLCache.Load(id); ok {
+		if vv, ok := v.(*downURLCacheEntry); ok {
+			if time.Now().After(vv.ExpireTime) {
+				return "", false
+			}
+			return vv.URL, true
+		}
+	}
+	return "", false
+}
+
+func (f *Fs) setDownloadLink(ctx context.Context, id string, downurl string) {
+	if f.downloadURLCache == nil {
+		f.downloadURLCache = &sync.Map{}
+	}
+	entry := &downURLCacheEntry{URL: downurl, ExpireTime: time.Now().Add(1 * time.Hour)}
+	f.downloadURLCache.Store(id, entry)
+}
+
 // Open an object for read
 func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
 	if o.id == "" {
@@ -1988,6 +2018,24 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	if o.fs.opt.AVOverride {
 		opts.Parameters = url.Values{"AVOverride": {"1"}}
 	}
+
+	var downurl string
+	if _downurl, ok := o.fs.getDownloadLink(ctx, o.id); ok {
+		downurl = _downurl
+	} else {
+		opts.NoRedirect = true
+		err = o.fs.pacer.Call(func() (bool, error) {
+			resp, err = o.fs.srv.Call(ctx, &opts)
+			return shouldRetry(ctx, resp, err)
+		})
+		if resp.StatusCode != 302 {
+			return nil, fmt.Errorf("/content API should return a 302 response to direct download link, but we got %s", resp.Status)
+		}
+		downurl = resp.Header.Get("Location")
+		o.fs.setDownloadLink(ctx, o.id, downurl)
+	}
+	opts.RootURL = downurl
+	opts.Path = ""
 
 	err = o.fs.pacer.Call(func() (bool, error) {
 		resp, err = o.fs.srv.Call(ctx, &opts)
