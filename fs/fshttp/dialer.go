@@ -2,7 +2,9 @@ package fshttp
 
 import (
 	"context"
+	"errors"
 	"net"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -23,6 +25,9 @@ type Dialer struct {
 	net.Dialer
 	timeout time.Duration
 	tclass  int
+
+	minSpeedPerSec   fs.SizeSuffix
+	minSpeedDuration time.Duration
 }
 
 // NewDialer creates a Dialer structure with Timeout, Keepalive,
@@ -36,6 +41,9 @@ func NewDialer(ctx context.Context) *Dialer {
 		},
 		timeout: ci.Timeout,
 		tclass:  int(ci.TrafficClass),
+
+		minSpeedPerSec:   ci.MinSpeedPerSec,
+		minSpeedDuration: ci.MinSpeedDuration,
 	}
 	if ci.BindAddr != nil {
 		dialer.Dialer.LocalAddr = &net.TCPAddr{IP: ci.BindAddr}
@@ -78,7 +86,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 	}
 
 	t := &timeoutConn{
-		Conn:    c,
+		Conn: &FastConn{
+			Conn:                 c,
+			minimumSpeedPerSec:   d.minSpeedPerSec,   // 400 * 1024 400k
+			minimumSpeedDuration: d.minSpeedDuration, //  300 * time.Second
+		},
 		timeout: d.timeout,
 	}
 	return t, t.nudgeDeadline()
@@ -115,6 +127,44 @@ func (c *timeoutConn) Write(b []byte) (n int, err error) {
 	n, err = c.Conn.Write(b)
 	if err == nil && n > 0 && c.timeout > 0 {
 		err = c.nudgeDeadline()
+	}
+	return n, err
+}
+
+// Mod
+type FastConn struct {
+	net.Conn
+	minimumSpeedPerSec   fs.SizeSuffix
+	minimumSpeedDuration time.Duration
+
+	curDeadlineStart   time.Time
+	curTrafficSum      int64
+	curTrafficDuration time.Duration
+}
+
+// Read bytes with rate limiting and idle timeouts
+func (c *FastConn) Read(b []byte) (n int, err error) {
+	// Ideally we would LimitBandwidth(len(b)) here and replace tokens we didn't use
+	if c.minimumSpeedPerSec == 0 {
+		return c.Conn.Read(b)
+	}
+	if time.Now().After(c.curDeadlineStart.Add(c.minimumSpeedDuration)) {
+		c.curDeadlineStart = time.Now()
+		c.curTrafficSum = 0
+		c.curTrafficDuration = 0
+	}
+	c.SetReadDeadline(c.curDeadlineStart.Add(c.minimumSpeedDuration))
+	startTime := time.Now()
+	n, err = c.Conn.Read(b)
+	c.curTrafficDuration += time.Now().Sub(startTime)
+	c.curTrafficSum += int64(n)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		minimumTraffic := int64(2 * 1024) // TLS Keepalive
+		if c.curTrafficSum > minimumTraffic && int(c.curTrafficSum) < int(c.minimumSpeedPerSec)*int(c.curTrafficDuration/time.Second) {
+			fs.Debugf(nil, "Killing connection because speed too low! startTime: %v, duration: %v, traffic: %d", c.curDeadlineStart, c.curTrafficDuration, c.curTrafficSum)
+			_ = c.Conn.Close()
+		}
+		//err = nil // passthrough the deadline error
 	}
 	return n, err
 }

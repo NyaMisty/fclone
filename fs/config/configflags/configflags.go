@@ -62,6 +62,8 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.DurationVarP(flagSet, &ci.ConnectTimeout, "contimeout", "", ci.ConnectTimeout, "Connect timeout")
 	flags.DurationVarP(flagSet, &ci.Timeout, "timeout", "", ci.Timeout, "IO idle timeout")
 	flags.DurationVarP(flagSet, &ci.ExpectContinueTimeout, "expect-continue-timeout", "", ci.ExpectContinueTimeout, "Timeout when using expect / 100-continue in HTTP")
+	flags.FVarP(flagSet, &ci.MinSpeedPerSec, "min-speed-per-sec", "", "Conn min read speed per sec")
+	flags.DurationVarP(flagSet, &ci.MinSpeedDuration, "min-speed-duration", "", 0, "Conn min read speed per sec")
 	flags.BoolVarP(flagSet, &dumpHeaders, "dump-headers", "", false, "Dump HTTP headers - may contain sensitive info")
 	flags.BoolVarP(flagSet, &dumpBodies, "dump-bodies", "", false, "Dump HTTP headers and bodies - may contain sensitive info")
 	flags.BoolVarP(flagSet, &ci.InsecureSkipVerify, "no-check-certificate", "", ci.InsecureSkipVerify, "Do not verify the server SSL certificate (insecure)")

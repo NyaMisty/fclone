@@ -67,6 +67,8 @@ type ConfigInfo struct {
 	ConnectTimeout          time.Duration // Connect timeout
 	Timeout                 time.Duration // Data channel timeout
 	ExpectContinueTimeout   time.Duration
+	MinSpeedPerSec          SizeSuffix    // Mod: Min speed
+	MinSpeedDuration        time.Duration // Mod: Min speed
 	Dump                    DumpFlags
 	InsecureSkipVerify      bool // Skip server certificate verification
 	DeleteMode              DeleteMode
