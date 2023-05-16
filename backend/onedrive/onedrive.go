@@ -742,6 +742,10 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 	if fserrors.ContextError(ctx, &err) {
 		return false, err
 	}
+	var obj fs.Object = nil
+	if _obj, ok := ctx.Value("onedrive-object").(fs.Object); ok {
+		obj = _obj
+	}
 	retry := false
 	if resp != nil {
 		switch resp.StatusCode {
@@ -754,27 +758,30 @@ func shouldRetry(ctx context.Context, resp *http.Response, err error) (bool, err
 		case 401:
 			if len(resp.Header["Www-Authenticate"]) == 1 && strings.Contains(resp.Header["Www-Authenticate"][0], "expired_token") {
 				retry = true
-				fs.Debugf(nil, "Should retry: %v", err)
+				fs.Debugf(obj, "Should retry: %v", err)
 			} else if err != nil && strings.Contains(err.Error(), "Unable to initialize RPS") {
 				retry = true
-				fs.Debugf(nil, "HTTP 401: Unable to initialize RPS. Trying again.")
+				fs.Debugf(obj, "HTTP 401: Unable to initialize RPS. Trying again.")
 			}
 		case 429: // Too Many Requests.
 			// see https://docs.microsoft.com/en-us/sharepoint/dev/general-development/how-to-avoid-getting-throttled-or-blocked-in-sharepoint-online
 			if values := resp.Header["Retry-After"]; len(values) == 1 && values[0] != "" {
 				retryAfter, parseErr := strconv.Atoi(values[0])
 				if parseErr != nil {
-					fs.Debugf(nil, "Failed to parse Retry-After: %q: %v", values[0], parseErr)
+					fs.Debugf(obj, "Failed to parse Retry-After: %q: %v", values[0], parseErr)
 				} else {
 					duration := time.Second * time.Duration(retryAfter)
 					retry = true
+					if duration > 60*time.Second {
+						duration = 60 * time.Second
+					}
 					err = pacer.RetryAfterError(err, duration)
-					fs.Debugf(nil, "Too many requests. Trying again in %d seconds.", retryAfter)
+					fs.Debugf(obj, "Too many requests. Trying again in %d seconds.", retryAfter)
 				}
 			}
 		case 504: // Gateway timeout
 			gatewayTimeoutError.Do(func() {
-				fs.Errorf(nil, "%v: upload chunks may be taking too long - try reducing --onedrive-chunk-size or decreasing --transfers", err)
+				fs.Errorf(obj, "%v: upload chunks may be taking too long - try reducing --onedrive-chunk-size or decreasing --transfers", err)
 			})
 		case 507: // Insufficient Storage
 			return false, fserrors.FatalError(err)
@@ -1993,6 +2000,12 @@ func (f *Fs) getDownloadLink(ctx context.Context, id string) (downurl string, ok
 	}
 	return "", false
 }
+func (f *Fs) removeDownloadLink(ctx context.Context, id string) {
+	if f.downloadURLCache == nil {
+		f.downloadURLCache = &sync.Map{}
+	}
+	f.downloadURLCache.Delete(id)
+}
 
 func (f *Fs) setDownloadLink(ctx context.Context, id string, downurl string) {
 	if f.downloadURLCache == nil {
@@ -2002,8 +2015,7 @@ func (f *Fs) setDownloadLink(ctx context.Context, id string, downurl string) {
 	f.downloadURLCache.Store(id, entry)
 }
 
-// Open an object for read
-func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
+func (o *Object) GetDownOpts(ctx context.Context, options []fs.OpenOption, forceUpdate bool) (retDownUrl *rest.Opts, err error) {
 	if o.id == "" {
 		return nil, errors.New("can't download - no id")
 	}
@@ -2020,7 +2032,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 
 	var downurl string
-	if _downurl, ok := o.fs.getDownloadLink(ctx, o.id); ok {
+	if _downurl, ok := o.fs.getDownloadLink(ctx, o.id); ok && !forceUpdate {
 		downurl = _downurl
 	} else {
 		opts.NoRedirect = true
@@ -2036,11 +2048,144 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 	opts.RootURL = downurl
 	opts.Path = ""
+	return &opts, nil
+}
 
-	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(ctx, resp, err)
-	})
+// Open an object for read
+func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.ReadCloser, err error) {
+	var resp *http.Response
+	isFirstTime := true
+	retried := 0
+	//BYPASS_INTERVAL := 40
+	//MAX_BYPASS_RETRY := 3
+	//BYPASS_CONCURRENT := 8
+	//CONCURRENT_STEP := 3
+	//forceUpdate := false
+	//concurrentTime := 2
+
+	BYPASS_INTERVAL := 30
+	MAX_BYPASS_RETRY := 4
+	BYPASS_CONCURRENT := 9
+	CONCURRENT_STEP := 5
+	forceUpdate := false
+	concurrentTime := 2
+
+	//BYPASS_INTERVAL := 0
+	//MAX_BYPASS_RETRY := 100
+	//BYPASS_CONCURRENT := 1
+	//CONCURRENT_STEP := 0
+	//forceUpdate := false
+	//concurrentTime := 1
+
+	// concurrentTime = 1 fail 10% when not throttled
+	// concurrentTime = 2 always succ when not throttled
+	// concurrentTime = 5 cannot bypass throttle
+	// concurrentTime = 8~9 can bypass throttle
+	// concurrentTime 2 -> 8 -> 14 -> 20 cannot bypass
+	// concurrentTime 2 -> 5 -> 8 can bypass, interval 40
+	// concurrentTime 2 -> 5 -> 8 -> 11 -> 12 cannot bypass, interval 25
+
+	var rangeSize int64 = -1
+	optCopy := []fs.OpenOption{}
+	for _, option := range options {
+		switch x := option.(type) {
+		case *fs.RangeOption:
+			rangeSize = x.End - x.Start + 1
+			newX := *x
+			optCopy = append(optCopy, &newX)
+		default:
+			optCopy = append(optCopy, x)
+		}
+	}
+	options = optCopy
+	for { // don't throttle direct down requests
+		_opts, err := o.GetDownOpts(ctx, options, forceUpdate)
+		forceUpdate = false
+		if err != nil {
+			continue
+			//return nil, err
+		}
+		opts := *_opts
+
+		for _, option := range opts.Options {
+			switch x := option.(type) {
+			case *fs.RangeOption:
+				x.End += rand.Int63n(16)
+			}
+		}
+
+		if isFirstTime {
+			isFirstTime = false
+			resp, err = o.fs.srv.Call(ctx, &opts)
+		} else {
+			if concurrentTime > BYPASS_CONCURRENT {
+				concurrentTime = BYPASS_CONCURRENT
+			}
+			// when throttled, if we send multi request at once, we can bypass the limit in a high chance
+			// also, we can notice the throttle is targeting a specific Range request
+			type CallRet struct {
+				resp *http.Response
+				err  error
+			}
+			retChan := make(chan CallRet)
+			for i := 0; i < concurrentTime; i++ {
+				go func() {
+					o.fs.srv.DropConns()
+					for _, option := range options {
+						switch x := option.(type) {
+						case *fs.RangeOption:
+							x.End += rand.Int63n(16)
+							if x.End+1 > o.Size() {
+								x.End = o.Size() - 1
+							}
+						}
+					}
+					_resp, _err := o.fs.srv.Call(ctx, &opts)
+					retChan <- CallRet{_resp, _err}
+				}()
+				//time.Sleep(100 * time.Millisecond)
+			}
+			errCount := 0
+			usedConcurrent := 0
+			for ; usedConcurrent < concurrentTime; usedConcurrent++ {
+				ret := <-retChan
+				resp, err = ret.resp, ret.err
+				if resp != nil && err == nil {
+					go func(remainTime int) {
+						for i := 0; i < remainTime; i++ {
+							ret := <-retChan
+							if ret.resp != nil {
+								_ = ret.resp.Body.Close()
+							}
+						}
+						close(retChan)
+					}(concurrentTime - usedConcurrent - 1)
+					break
+				} else {
+					if resp != nil {
+						_ = resp.Body.Close()
+					}
+					errCount += 1
+				}
+			}
+			fs.Debugf(o, "Open() concurrent bypass: errCount = %d / %d (retried %d)", errCount, concurrentTime, retried)
+			concurrentTime += CONCURRENT_STEP
+		}
+		if retry, _ := shouldRetry(context.WithValue(ctx, "onedrive-object", o), resp, err); !retry {
+			break
+		}
+
+		// throttled, drop all existing connections and retry
+		if retried >= MAX_BYPASS_RETRY {
+			fs.Debugf(o, "Trying to refresh URL to bypass throttle..")
+			forceUpdate = true
+			retried = 0
+			concurrentTime = 2
+			//return nil, err
+		}
+		time.Sleep(time.Duration(BYPASS_INTERVAL) * time.Second)
+		retried += 1
+	}
 	if err != nil {
 		if resp != nil {
 			if virus := resp.Header.Get("X-Virus-Infected"); virus != "" {
