@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"path"
@@ -2099,13 +2100,14 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	}
 	options = optCopy
 	for { // don't throttle direct down requests
-		_opts, err := o.GetDownOpts(ctx, options, forceUpdate)
-		forceUpdate = false
-		if err != nil {
+		var opts rest.Opts
+		if _opts, err := o.GetDownOpts(ctx, options, forceUpdate); err != nil {
 			continue
 			//return nil, err
+		} else {
+			forceUpdate = false
+			opts = *_opts
 		}
-		opts := *_opts
 
 		for _, option := range opts.Options {
 			switch x := option.(type) {
@@ -2198,6 +2200,9 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	if resp.StatusCode == http.StatusOK && resp.ContentLength > 0 && resp.Header.Get("Content-Range") == "" {
 		//Overwrite size with actual size since size readings from Onedrive is unreliable.
 		o.size = resp.ContentLength
+	}
+	if rangeSize > 0 {
+		return readers.NewLimitedReadCloser(resp.Body, rangeSize), err
 	}
 	return resp.Body, err
 }
