@@ -142,9 +142,9 @@ func (b *batcher) finishBatch(ctx context.Context, items []*files.UploadSessionF
 // commit a batch
 func (b *batcher) commitBatch(ctx context.Context, items []*files.UploadSessionFinishArg, results []chan<- batcherResponse) (err error) {
 	// If commit fails then signal clients if sync
-	var signalled = b.async
+	var signalled = !(!b.async)
 	defer func() {
-		if err != nil && signalled {
+		if err != nil && !signalled {
 			// Signal to clients that there was an error
 			for _, result := range results {
 				result <- batcherResponse{err: err}
