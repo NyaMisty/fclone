@@ -8,8 +8,10 @@ package dropbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +118,15 @@ func (b *batcher) Batching() bool {
 	return b.size > 0
 }
 
+type UploadSessionFinishAPIError files.UploadSessionFinishAPIError
+
+func wrapDropboxError(err error) error {
+	if e, ok := err.(files.UploadSessionFinishAPIError); ok {
+		return fmt.Errorf("upload sesson finish api error: %w, endpoing error: %v", e, e.EndpointError)
+	}
+	return err
+}
+
 // finishBatch commits the batch, returning a batch status to poll or maybe complete
 func (b *batcher) finishBatch(ctx context.Context, items []*files.UploadSessionFinishArg) (complete *files.UploadSessionFinishBatchResult, err error) {
 	var arg = &files.UploadSessionFinishBatchArg{
@@ -126,14 +137,17 @@ func (b *batcher) finishBatch(ctx context.Context, items []*files.UploadSessionF
 		// If error is insufficient space then don't retry
 		if e, ok := err.(files.UploadSessionFinishAPIError); ok {
 			if e.EndpointError != nil && e.EndpointError.Path != nil && e.EndpointError.Path.Tag == files.WriteErrorInsufficientSpace {
+				err = wrapDropboxError(err)
 				err = fserrors.NoRetryError(err)
 				return false, err
 			}
 		}
+		err = wrapDropboxError(err)
 		// after the first chunk is uploaded, we retry everything
 		return err != nil, err
 	})
 	if err != nil {
+		err = wrapDropboxError(err)
 		return nil, fmt.Errorf("batch commit failed: %w", err)
 	}
 	return complete, nil
@@ -191,7 +205,12 @@ func (b *batcher) commitBatch(ctx context.Context, items []*files.UploadSessionF
 					errorTag += "/" + item.Failure.PropertiesError.Tag
 				}
 			}
-			resp.err = fmt.Errorf("batch upload failed: %s", errorTag)
+			itemJsonB, _ := json.Marshal(item)
+			itemJson := ""
+			if itemJsonB != nil {
+				itemJson = string(itemJsonB)
+			}
+			resp.err = fmt.Errorf("batch upload failed: %s (%v)", errorTag, itemJson)
 		}
 		if !b.async {
 			results[i] <- resp
@@ -288,15 +307,33 @@ func (b *batcher) Commit(ctx context.Context, commitInfo *files.UploadSessionFin
 	default:
 	}
 	fs.Debugf(b.f, "Adding %q to batch", commitInfo.Commit.Path)
-	resp := make(chan batcherResponse, 1)
-	b.in <- batcherRequest{
-		commitInfo: commitInfo,
-		result:     resp,
+	sendBatch := func() (entry *files.FileMetadata, err error) {
+		resp := make(chan batcherResponse, 1)
+		b.in <- batcherRequest{
+			commitInfo: commitInfo,
+			result:     resp,
+		}
+		// If running async then don't wait for the result
+		if b.async {
+			return nil, nil
+		}
+		result := <-resp
+		return result.entry, result.err
 	}
-	// If running async then don't wait for the result
 	if b.async {
-		return nil, nil
+		return sendBatch()
 	}
-	result := <-resp
-	return result.entry, result.err
+
+	err = b.f.pacer.Call(func() (retry bool, err error) {
+		entry, err = sendBatch()
+		retry = false
+		if err != nil {
+			if strings.Contains(err.Error(), "too_many_write_operations") {
+				fs.Debugf(b.f, "got dropbox batch err: %v, err type: %T", err.Error(), err)
+				retry = true
+			}
+		}
+		return
+	})
+	return entry, err
 }
