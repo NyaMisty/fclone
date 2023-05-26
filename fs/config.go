@@ -128,6 +128,8 @@ type ConfigInfo struct {
 	ClientKey               string   // Client Side Key
 	MultiThreadCutoff       SizeSuffix
 	MultiThreadStreams      int
+	MultiThreadChunkSize    string
+	MultiThreadChunkAhead   int
 	MultiThreadSet          bool   // whether MultiThreadStreams was set (set in fs/config/configflags)
 	OrderBy                 string // instructions on how to order the transfer
 	UploadHeaders           []*HTTPOption

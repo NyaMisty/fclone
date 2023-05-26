@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"golang.org/x/sync/errgroup"
+	"io"
 )
 
 const (
@@ -38,9 +37,10 @@ func doMultiThreadCopy(ctx context.Context, f fs.Fs, src fs.Object) bool {
 	}
 	// ...destination doesn't support it
 	dstFeatures := f.Features()
-	if dstFeatures.OpenWriterAt == nil {
+	if dstFeatures.OpenWriterAt == nil && ci.MultiThreadChunkSize == "" {
 		return false
 	}
+
 	// ...if --multi-thread-streams not in use and source and
 	// destination are both local
 	if !ci.MultiThreadSet && dstFeatures.IsLocal && src.Fs().Features().IsLocal {
@@ -147,6 +147,9 @@ func (mc *multiThreadCopyState) calculateChunks() {
 func multiThreadCopy(ctx context.Context, f fs.Fs, remote string, src fs.Object, streams int, tr *accounting.Transfer) (newDst fs.Object, err error) {
 	openWriterAt := f.Features().OpenWriterAt
 	if openWriterAt == nil {
+		if fs.GetConfig(ctx).MultiThreadChunkSize != "" {
+			return multiThreadCopyChunked(ctx, f, remote, src, streams, tr)
+		}
 		return nil, errors.New("multi-thread copy: OpenWriterAt not supported")
 	}
 	if src.Size() < 0 {
