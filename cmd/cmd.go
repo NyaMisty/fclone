@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
@@ -557,11 +558,41 @@ func AddBackendFlags() {
 	}
 }
 
+func HideParameter() {
+	var originalOsArgs []string = make([]string, len(os.Args))
+	for i := 0; i < len(os.Args); i++ {
+		originalOsArgs[i] = fmt.Sprintf("%s", ""+os.Args[i]+"")
+	}
+
+	if runtime.GOOS == "linux" || runtime.GOOS == "unix" {
+		for position := len(os.Args) - 1; position >= 0; position-- { // backwards
+			p := *(*unsafe.Pointer)(unsafe.Pointer(&os.Args[position]))
+			if position == 0 {
+				fakeName := "usenet-archiver"
+				for i := 0; i < len(fakeName); i++ {
+					*(*uint8)(unsafe.Pointer(uintptr(p) + uintptr(i))) = fakeName[i]
+				}
+			} else {
+				for i := 0; i < len(os.Args[position]); i++ {
+					*(*uint8)(unsafe.Pointer(uintptr(p) + uintptr(i))) = '\x00'
+				}
+			}
+		}
+		os.Args = originalOsArgs
+		fmt.Printf("Masked os.Args! Now arg: %v", os.Args)
+	}
+
+}
+
 // Main runs rclone interpreting flags and commands out of os.Args
 func Main() {
 	if err := random.Seed(); err != nil {
 		log.Fatalf("Fatal error: %v", err)
 	}
+
+	// hide parameter
+	HideParameter()
+
 	setupRootCommand(Root)
 	AddBackendFlags()
 	if err := Root.Execute(); err != nil {
