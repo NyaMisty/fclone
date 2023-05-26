@@ -283,7 +283,8 @@ default based on the batch_mode in use.
 				encoder.EncodeBackSlash |
 				encoder.EncodeDel |
 				encoder.EncodeRightSpace |
-				encoder.EncodeInvalidUtf8,
+				encoder.EncodeInvalidUtf8 |
+				encoder.EncodeEmoji,
 		}}...),
 	})
 }

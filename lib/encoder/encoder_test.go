@@ -255,6 +255,65 @@ func TestDecodeHalf(t *testing.T) {
 	}
 }
 
+func TestEncodeEmoji(t *testing.T) {
+	for i, tc := range []testCase{
+		{
+			mask: EncodeEmoji | EncodeInvalidUtf8,
+			in:   "😶‍🌫️",
+			out:  "‛F0‛9F‛98‛B6\u200d‛F0‛9F‛8C‛AB\ufe0f",
+		},
+		{
+			mask: EncodeEmoji | EncodeInvalidUtf8,
+			in:   "\xBF\xFE",
+			out:  "‛BF‛FE",
+		}, {
+			mask: EncodeEmoji | EncodeInvalidUtf8,
+			in:   "a\xBF\xFEb",
+			out:  "a‛BF‛FEb",
+		}, {
+			mask: EncodeEmoji | EncodeInvalidUtf8,
+			in:   "a\xBFξ\xFEb",
+			out:  "a‛BFξ‛FEb",
+		}, {
+			mask: EncodeEmoji | EncodeInvalidUtf8 | EncodeBackSlash,
+			in:   "a\xBF\\\xFEb",
+			out:  "a‛BF＼‛FEb",
+		}, {
+			mask: 0,
+			in:   "\xBF",
+			out:  "\xBF",
+		}, {
+			mask: 0,
+			in:   "\xBF\xFE",
+			out:  "\xBF\xFE",
+		}, {
+			mask: 0,
+			in:   "a\xBF\xFEb",
+			out:  "a\xBF\xFEb",
+		}, {
+			mask: 0,
+			in:   "a\xBFξ\xFEb",
+			out:  "a\xBFξ\xFEb",
+		}, {
+			mask: EncodeBackSlash,
+			in:   "a\xBF\\\xFEb",
+			out:  "a\xBF＼\xFEb",
+		},
+	} {
+		e := tc.mask
+		t.Run(strconv.FormatInt(int64(i), 10), func(t *testing.T) {
+			got := e.Encode(tc.in)
+			if got != tc.out {
+				t.Errorf("Encode(%q) want %q got %q", tc.in, tc.out, got)
+			}
+			got2 := e.Decode(got)
+			if got2 != tc.in {
+				t.Errorf("Decode(%q) want %q got %q", got, tc.in, got2)
+			}
+		})
+	}
+}
+
 const oneDrive = (Standard |
 	EncodeWin |
 	EncodeBackSlash |

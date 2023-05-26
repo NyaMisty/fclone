@@ -63,6 +63,8 @@ const (
 	EncodeDot                                    // . and .. names
 	EncodeSquareBracket                          // []
 	EncodeSemicolon                              // ;
+	EncodeEmoji                                  // emoji that's not in BMP range (U+1F000~)
+	// MUST BE USED TOGETHER WITH EncodeInvalidUtf8
 
 	// Synthetic
 	EncodeWin         = EncodeColon | EncodeQuestion | EncodeDoubleQuote | EncodeAsterisk | EncodeLtGt | EncodePipe // :?"*<>|
@@ -145,6 +147,7 @@ func init() {
 	alias("RightCrLfHtVt", EncodeRightCrLfHtVt)
 	alias("InvalidUtf8", EncodeInvalidUtf8)
 	alias("Dot", EncodeDot)
+	alias("Emoji", EncodeEmoji)
 }
 
 // validStrings returns all the valid MultiEncoder strings
@@ -427,6 +430,11 @@ func (mask MultiEncoder) Encode(in string) string {
 					return true
 				}
 			}
+			if mask.Has(EncodeEmoji) { // Emojis(U+1F000-U+1FA00)
+				if r >= 0x1F000 && r <= 0x1FA00 {
+					return true
+				}
+			}
 			return false
 		})
 	}
@@ -663,6 +671,15 @@ func (mask MultiEncoder) Encode(in string) string {
 				continue
 			}
 		}
+		if mask.Has(EncodeEmoji) {
+			if r >= 0x1F000 && r <= 0x1FA00 {
+				// we treat non-BMP emoji as invalid UTF8, and use corresponding quoting
+				// when decoding, we simply reuse EncodeInvalidUtf8's logic
+				_, l := utf8.DecodeRuneInString(in[i:])
+				appendQuotedBytes(&out, in[i:i+l])
+				continue
+			}
+		}
 		out.WriteRune(r)
 	}
 	out.WriteString(suffix)
@@ -845,6 +862,9 @@ func (mask MultiEncoder) Decode(in string) string {
 				if r > symbolOffset && r <= symbolOffset+0x1F {
 					return true
 				}
+			}
+			if mask.Has(EncodeEmoji) {
+				// no addition processing needed, directly reuse EncodeInvalidUtf8's logic
 			}
 
 			return false
@@ -1083,7 +1103,7 @@ func (mask MultiEncoder) Decode(in string) string {
 			}
 		}
 		if unquote {
-			if mask.Has(EncodeInvalidUtf8) {
+			if mask.Has(EncodeInvalidUtf8) { // also processes EncodeEmoji
 				skipNext = appendUnquotedByte(&out, in[i:])
 				if skipNext {
 					continue
