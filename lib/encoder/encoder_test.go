@@ -255,27 +255,27 @@ func TestDecodeHalf(t *testing.T) {
 	}
 }
 
-func TestEncodeEmoji(t *testing.T) {
+func TestEncodeNonBMP(t *testing.T) {
 	for i, tc := range []testCase{
 		{
-			mask: EncodeEmoji | EncodeInvalidUtf8,
+			mask: EncodeNonBMP | EncodeInvalidUtf8,
 			in:   "😶‍🌫️",
 			out:  "‛F0‛9F‛98‛B6\u200d‛F0‛9F‛8C‛AB\ufe0f",
 		},
 		{
-			mask: EncodeEmoji | EncodeInvalidUtf8,
+			mask: EncodeNonBMP | EncodeInvalidUtf8,
 			in:   "\xBF\xFE",
 			out:  "‛BF‛FE",
 		}, {
-			mask: EncodeEmoji | EncodeInvalidUtf8,
+			mask: EncodeNonBMP | EncodeInvalidUtf8,
 			in:   "a\xBF\xFEb",
 			out:  "a‛BF‛FEb",
 		}, {
-			mask: EncodeEmoji | EncodeInvalidUtf8,
+			mask: EncodeNonBMP | EncodeInvalidUtf8,
 			in:   "a\xBFξ\xFEb",
 			out:  "a‛BFξ‛FEb",
 		}, {
-			mask: EncodeEmoji | EncodeInvalidUtf8 | EncodeBackSlash,
+			mask: EncodeNonBMP | EncodeInvalidUtf8 | EncodeBackSlash,
 			in:   "a\xBF\\\xFEb",
 			out:  "a‛BF＼‛FEb",
 		}, {
