@@ -284,7 +284,7 @@ default based on the batch_mode in use.
 				encoder.EncodeDel |
 				encoder.EncodeRightSpace |
 				encoder.EncodeInvalidUtf8 |
-				encoder.EncodeEmoji,
+				encoder.EncodeNonBMP,
 		}}...),
 	})
 }

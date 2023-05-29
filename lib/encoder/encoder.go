@@ -63,7 +63,7 @@ const (
 	EncodeDot                                    // . and .. names
 	EncodeSquareBracket                          // []
 	EncodeSemicolon                              // ;
-	EncodeEmoji                                  // emoji that's not in BMP range (U+1F000~)
+	EncodeNonBMP                                 // Unicode that's not in BMP range (U+10000~)
 	// MUST BE USED TOGETHER WITH EncodeInvalidUtf8
 
 	// Synthetic
@@ -147,7 +147,7 @@ func init() {
 	alias("RightCrLfHtVt", EncodeRightCrLfHtVt)
 	alias("InvalidUtf8", EncodeInvalidUtf8)
 	alias("Dot", EncodeDot)
-	alias("Emoji", EncodeEmoji)
+	alias("NonBMP", EncodeNonBMP)
 }
 
 // validStrings returns all the valid MultiEncoder strings
@@ -430,8 +430,8 @@ func (mask MultiEncoder) Encode(in string) string {
 					return true
 				}
 			}
-			if mask.Has(EncodeEmoji) { // Emojis(U+1F000-U+1FA00)
-				if r >= 0x1F000 && r <= 0x1FA00 {
+			if mask.Has(EncodeNonBMP) { // Non-BMP (Usually Emojis & Symbols)
+				if r >= 0x10000 {
 					return true
 				}
 			}
@@ -671,9 +671,9 @@ func (mask MultiEncoder) Encode(in string) string {
 				continue
 			}
 		}
-		if mask.Has(EncodeEmoji) {
-			if r >= 0x1F000 && r <= 0x1FA00 {
-				// we treat non-BMP emoji as invalid UTF8, and use corresponding quoting
+		if mask.Has(EncodeNonBMP) {
+			if r >= 0x10000 {
+				// we treat NonBMP as invalid UTF8, and use corresponding quoting
 				// when decoding, we simply reuse EncodeInvalidUtf8's logic
 				_, l := utf8.DecodeRuneInString(in[i:])
 				appendQuotedBytes(&out, in[i:i+l])
@@ -863,7 +863,7 @@ func (mask MultiEncoder) Decode(in string) string {
 					return true
 				}
 			}
-			if mask.Has(EncodeEmoji) {
+			if mask.Has(EncodeNonBMP) {
 				// no addition processing needed, directly reuse EncodeInvalidUtf8's logic
 			}
 
@@ -1103,7 +1103,7 @@ func (mask MultiEncoder) Decode(in string) string {
 			}
 		}
 		if unquote {
-			if mask.Has(EncodeInvalidUtf8) { // also processes EncodeEmoji
+			if mask.Has(EncodeInvalidUtf8) { // also processes EncodeNonBMP
 				skipNext = appendUnquotedByte(&out, in[i:])
 				if skipNext {
 					continue
