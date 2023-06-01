@@ -2834,6 +2834,12 @@ func (f *Fs) PutUnchecked(ctx context.Context, in io.Reader, src fs.ObjectInfo, 
 		if err != nil {
 			return nil, err
 		}
+		defer func() {
+			deleteErr := f.delete(ctx, info.Id, false)
+			if deleteErr != nil {
+				fs.Debugf("Cannot delete tmp upload file %s/%s: %v", tmpDriveID, info.Id, deleteErr)
+			}
+		}()
 		tmpFileObj, err := f.newObjectWithInfo(ctx, remote, info)
 		if err != nil {
 			return nil, err
