@@ -147,7 +147,6 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 	//      (chunkSizes, pre-warm link)
 	//
 	CHUNK_SIZES := []int64{}
-	//CHUNK_SIZES := []int64{1 * 1024, MULTITHREAD_CHUNK_SIZE}
 	for _, sizeStr := range strings.Split(ci.MultiThreadChunkSize, ",") {
 		var size fs.SizeSuffix
 		if err := size.Set(sizeStr); err != nil {
@@ -156,8 +155,6 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 		}
 		CHUNK_SIZES = append(CHUNK_SIZES, int64(size))
 	}
-
-	MULTITHREAD_CHUNK_SIZE := int64(fs.GetConfig(ctx).MultiThreadCutoff) / int64(2)
 
 	totalSize := src.Size()
 	chunkTasks := splitDownloadChunks(totalSize, CHUNK_SIZES)
@@ -208,8 +205,9 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 
 	multiThreadChunkPool := pool.New(
 		10*time.Second, int(maxChunkSize),
-		streams+ci.MultiThreadChunkAhead+1, // one addition for temporary use
+		(streams+ci.MultiThreadChunkAhead+1)/2, // one addition for temporary use
 		true)
+	defer multiThreadChunkPool.Flush()
 
 	var waitingThread int32
 	streamDownloader := func(stream int) {
@@ -363,10 +361,8 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 						safeChanSend(errChan, err)
 					}
 					fs.Debugf(src, "multi-thread copy: writeLoop: wrote chunk %d to pipe, took %v", curChunk, time.Now().Sub(startTime))
-					if cap(chunkContent.buf) == int(MULTITHREAD_CHUNK_SIZE) {
-						if cap(chunkContent.buf) == int(maxChunkSize) {
-							multiThreadChunkPool.Put(chunkContent.buf)
-						}
+					if cap(chunkContent.buf) == int(maxChunkSize) {
+						multiThreadChunkPool.Put(chunkContent.buf)
 					}
 					if chunkTasks[curChunk].end == chunkContent.end {
 						curChunk = chunkContent.index + 1
