@@ -4,6 +4,7 @@ package fs
 
 import (
 	"context"
+	"runtime/debug"
 	"time"
 
 	"github.com/rclone/rclone/fs/fserrors"
@@ -87,7 +88,7 @@ func (p *Pacer) ModifyCalculator(f func(pacer.Calculator)) {
 func pacerInvoker(try, retries int, f pacer.Paced) (retry bool, err error) {
 	retry, err = f()
 	if retry {
-		Debugf("pacer", "low level retry %d/%d (error %v)", try, retries, err)
+		Debugf("pacer", "low level retry %d/%d (error %v), stack: %s", try, retries, err, string(debug.Stack()))
 		err = fserrors.RetryError(err)
 	}
 	return
