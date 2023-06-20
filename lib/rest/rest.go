@@ -522,3 +522,9 @@ func (api *Client) callCodec(ctx context.Context, opts *Opts, request interface{
 	err = decode(resp, response)
 	return resp, err
 }
+
+func (api *Client) DropConns() {
+	if transport, ok := api.c.Transport.(*http.Transport); ok {
+		transport.CloseIdleConnections()
+	}
+}
