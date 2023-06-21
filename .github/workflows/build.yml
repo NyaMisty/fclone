@@ -402,7 +402,7 @@ jobs:
       uses: ncipollo/release-action@v1
       with:
         artifacts: "rclonebuild/*"
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.MY_TOKEN }}
         name: ${{ format('AutoBuild - {0}', github.event.commits[0].message) }}
         tag: "action_build"
         commit: master
