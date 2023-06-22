@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/rclone/rclone/backend/drive"
+	"golang.org/x/sync/semaphore"
 	"path"
 	"sort"
 	"strings"
@@ -75,6 +76,9 @@ type syncCopyMove struct {
 	backupDir              fs.Fs                  // place to store overwrites/deletes
 	checkFirst             bool                   // if set run all the checkers before starting transfers
 	maxDurationEndTime     time.Time              // end time if --max-duration is set
+	transferStartTime      time.Time              // run transfers at this time
+
+	toBeRetried *pipe // retry channel
 
 	srcOnlyDirsMu sync.Mutex             // protect srcOnlyDirs
 	srcOnlyDirs   map[string]fs.DirEntry // src only dirs
@@ -106,6 +110,14 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 	}
 	ci := fs.GetConfig(ctx)
 	fi := filter.GetConfig(ctx)
+	var transferStartTime time.Time
+	if ci.TransferStartTime != "" {
+		if _transferStartTime, err := time.ParseInLocation("2006-01-02 15:04:05", ci.TransferStartTime, time.UTC); err != nil {
+			panic(err)
+		} else {
+			transferStartTime = _transferStartTime
+		}
+	}
 	s := &syncCopyMove{
 		ci:                     ci,
 		fi:                     fi,
@@ -131,10 +143,15 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		modifyWindow:           fs.GetModifyWindow(ctx, fsrc, fdst),
 		trackRenamesCh:         make(chan fs.Object, ci.Checkers),
 		checkFirst:             ci.CheckFirst,
+		transferStartTime:      transferStartTime,
 	}
 	backlog := ci.MaxBacklog
 	if s.checkFirst {
 		fs.Infof(s.fdst, "Running all checks before starting transfers")
+		backlog = -1
+	}
+	if !s.transferStartTime.IsZero() {
+		fs.Infof(s.fdst, "Running all checks due to delayed transfers")
 		backlog = -1
 	}
 	var err error
@@ -147,6 +164,10 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		return nil, err
 	}
 	s.toBeRenamed, err = newPipe(ci.OrderBy, accounting.Stats(ctx).SetRenameQueue, backlog)
+	if err != nil {
+		return nil, err
+	}
+	s.toBeRetried, err = newPipe(ci.OrderBy, func(items int, totalSize int64) {}, -1)
 	if err != nil {
 		return nil, err
 	}
@@ -442,6 +463,9 @@ func (s *syncCopyMove) pairCopyOrMove(ctx context.Context, in *pipe, fdst fs.Fs,
 		} else {
 			_, err = operations.Copy(ctx, fdst, dst, src.Remote(), src)
 		}
+		if err != nil {
+			s.toBeRetried.Put(ctx, pair)
+		}
 		s.processError(err)
 	}
 }
@@ -465,9 +489,14 @@ func (s *syncCopyMove) stopCheckers() {
 // This starts the background transfers
 func (s *syncCopyMove) startTransfers() {
 	s.transfersWg.Add(s.ci.Transfers)
+	ctx := s.ctx
+	if s.ci.TrafficThreads > 0 {
+		totalSem := int64(s.ci.TrafficThreads) * 2 // 1 multithread = 2sem, 1 single thread = 1sem
+		ctx = context.WithValue(s.ctx, "trafficThreadSemaphore", semaphore.NewWeighted(totalSem))
+	}
 	for i := 0; i < s.ci.Transfers; i++ {
 		fraction := (100 * i) / s.ci.Transfers
-		go s.pairCopyOrMove(s.ctx, s.toBeUploaded, s.fdst, fraction, &s.transfersWg)
+		go s.pairCopyOrMove(ctx, s.toBeUploaded, s.fdst, fraction, &s.transfersWg)
 	}
 }
 
@@ -913,7 +942,22 @@ func (s *syncCopyMove) run() error {
 	s.startCheckers()
 	s.startRenamers()
 	if !s.checkFirst {
-		s.startTransfers()
+		if !s.transferStartTime.IsZero() {
+			fs.Infof(nil, "Delaying transfers to %v", s.transferStartTime)
+			if time.Now().After(s.transferStartTime) {
+				fs.LogPrintf(fs.LogLevelWarning, nil, "Specified transfer start time later than now, starting transfer directly!")
+				s.startTransfers()
+			} else {
+				s.transfersWg.Add(1)
+				time.AfterFunc(s.transferStartTime.Sub(time.Now()), func() {
+					s.startTransfers()
+					time.Sleep(2 * time.Second) // avoid race condition
+					s.transfersWg.Done()
+				})
+			}
+		} else {
+			s.startTransfers()
+		}
 	}
 	s.startDeleters()
 	s.dstFiles = make(map[string]fs.Object)
@@ -963,8 +1007,58 @@ func (s *syncCopyMove) run() error {
 		fs.Infof(s.fdst, "Checks finished, now starting transfers")
 		s.startTransfers()
 	}
-	s.stopRenamers()
 	s.stopTransfers()
+
+	for i := 0; i < s.ci.HighLevelRetries; i++ {
+		var err error
+		lastRetryQueue := s.toBeRetried
+		if lastRetryQueue.Len() == 0 {
+			break
+		}
+		fs.Infof(s.fdst, "Doing high level retry %d/%d", i, s.ci.HighLevelRetries)
+		time.Sleep(1 * time.Second)
+
+		ci := s.ci
+		ctx := s.ctx
+		backlog := -1
+		s.toBeChecked, err = newPipe(ci.OrderBy, accounting.Stats(ctx).SetCheckQueue, backlog)
+		if err != nil {
+			return err
+		}
+		s.toBeUploaded, err = newPipe(ci.OrderBy, accounting.Stats(ctx).SetTransferQueue, backlog)
+		if err != nil {
+			return err
+		}
+		s.toBeRetried, err = newPipe(ci.OrderBy, func(items int, totalSize int64) {}, -1)
+		if err != nil {
+			return err
+		}
+		s.startCheckers()
+		s.startTransfers()
+		for {
+			if items, _ := lastRetryQueue.Stats(); items == 0 {
+				break
+			}
+			pair, ok := lastRetryQueue.Get(s.inCtx)
+			if !ok {
+				break
+			}
+			s.toBeChecked.Put(s.inCtx, pair)
+		}
+		fs.Infof(s.fdst, "Waiting for checkers to finish...")
+		for s.toBeChecked.Len() > 0 {
+			fs.Infof(s.fdst, "Waiting for checkers to finish... length: %d", s.toBeChecked.Len())
+			time.Sleep(10 * time.Second)
+		}
+		s.stopCheckers()
+		s.stopTransfers()
+		//fs.Infof(s.fdst, "Waiting for transfers to finish... length: %d", s.toBeUploaded.Len())
+		//for s.toBeUploaded.Len() > 0 {
+		//	time.Sleep(10*time.Second)
+		//}
+	}
+
+	s.stopRenamers()
 	s.stopDeleters()
 
 	if s.copyEmptySrcDirs {

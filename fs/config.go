@@ -77,6 +77,7 @@ type ConfigInfo struct {
 	TrackRenames            bool   // Track file renames.
 	TrackRenamesStrategy    string // Comma separated list of strategies used to track renames
 	LowLevelRetries         int
+	HighLevelRetries        int
 	UpdateOlder             bool // Skip files that are newer on the destination
 	NoGzip                  bool // Disable compression
 	MaxDepth                int
@@ -85,6 +86,7 @@ type ConfigInfo struct {
 	IgnoreCaseSync          bool
 	NoTraverse              bool
 	CheckFirst              bool
+	TransferStartTime       string
 	NoCheckDest             bool
 	NoUnicodeNormalization  bool
 	NoUpdateModTime         bool
