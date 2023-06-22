@@ -64,6 +64,7 @@ type ConfigInfo struct {
 	ModifyWindow            time.Duration
 	Checkers                int
 	Transfers               int
+	TrafficThreads          int           // Max thread that doing traffic things (i.e. download)
 	ConnectTimeout          time.Duration // Connect timeout
 	Timeout                 time.Duration // Data channel timeout
 	ExpectContinueTimeout   time.Duration

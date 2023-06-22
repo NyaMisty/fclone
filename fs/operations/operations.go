@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/semaphore"
 	"io"
 	"mime"
 	"net/http"
@@ -395,6 +396,12 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 			err = fs.ErrorCantCopy
 		}
 		// If can't server-side copy, do it manually
+		trafficSem := semaphore.NewWeighted(100000) // by default a large enough sem
+		if val := ctx.Value("trafficThreadSemaphore"); val != nil {
+			if _val, ok := val.(*semaphore.Weighted); ok {
+				trafficSem = _val
+			}
+		}
 		if err == fs.ErrorCantCopy {
 			if doMultiThreadCopy(ctx, f, src) {
 				// Number of streams proportional to size
@@ -406,7 +413,21 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 				if streams < 2 {
 					streams = 2
 				}
+				var _in io.ReadCloser
+
+				// Mod
+				if err = trafficSem.Acquire(ctx, streams*2); err != nil {
+					break
+				}
+
+				_in, err = NewReOpen(ctx, src, ci.LowLevelRetries) // keep a reference to open object here
 				dst, err = multiThreadCopy(ctx, f, remotePartial, src, int(streams), tr)
+
+				trafficSem.Release(streams * 2) // Mod
+
+				if _in != nil {
+					_ = _in.Close() // stop it after closed
+				}
 				if err == nil {
 					newDst = dst
 				}
@@ -425,6 +446,10 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 				if err != nil {
 					err = fmt.Errorf("failed to open source object: %w", err)
 				} else {
+					// Mod
+					if err = trafficSem.Acquire(ctx, 1); err != nil {
+						break
+					}
 					if src.Size() == -1 {
 						// -1 indicates unknown size. Use Rcat to handle both remotes supporting and not supporting PutStream.
 						if doUpdate {
@@ -443,6 +468,7 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 						// NB Rcat closes in0
 						dst, err = Rcat(ctx, f, remotePartial, in0, src.ModTime(ctx), meta)
 						newDst = dst
+						trafficSem.Release(1) // Mod
 					} else {
 						in := tr.Account(ctx, in0).WithBuffer() // account and buffer the transfer
 						var wrappedSrc fs.ObjectInfo = src
@@ -467,6 +493,7 @@ func Copy(ctx context.Context, f fs.Fs, dst fs.Object, remote string, src fs.Obj
 						} else {
 							actionTaken = "Copied (new)"
 						}
+						trafficSem.Release(1) // Mod
 						closeErr := in.Close()
 						if err == nil {
 							newDst = dst

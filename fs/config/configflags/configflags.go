@@ -49,6 +49,7 @@ func AddFlags(ci *fs.ConfigInfo, flagSet *pflag.FlagSet) {
 	flags.DurationVarP(flagSet, &ci.ModifyWindow, "modify-window", "", ci.ModifyWindow, "Max time diff to be considered the same")
 	flags.IntVarP(flagSet, &ci.Checkers, "checkers", "", ci.Checkers, "Number of checkers to run in parallel")
 	flags.IntVarP(flagSet, &ci.Transfers, "transfers", "", ci.Transfers, "Number of file transfers to run in parallel")
+	flags.IntVarP(flagSet, &ci.TrafficThreads, "traffic-threads", "", ci.TrafficThreads, "Number of traffic threads to run in parallel")
 	flags.StringVarP(flagSet, &configPath, "config", "", config.GetConfigPath(), "Config file")
 	flags.StringVarP(flagSet, &cacheDir, "cache-dir", "", config.GetCacheDir(), "Directory rclone will use for caching")
 	flags.StringVarP(flagSet, &tempDir, "temp-dir", "", os.TempDir(), "Directory rclone will use for temporary files")
