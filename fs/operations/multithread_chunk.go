@@ -7,6 +7,8 @@ import (
 	"github.com/aalpar/deheap"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
+	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/lib/pool"
 	"io"
 	"strings"
@@ -76,15 +78,15 @@ func safeChanClose[T any](ch chan T) (justClosed bool) {
 	return true // <=> justClosed = true; return
 }
 
-func safeChanSend[T any](ch chan T, value T) (closed bool) {
+func safeChanSend[T any](ch chan T, value T) (succ bool) {
 	defer func() {
 		if recover() != nil {
-			closed = true
+			succ = false
 		}
 	}()
 
-	ch <- value  // panic if ch is closed
-	return false // <=> closed = false; return
+	ch <- value // panic if ch is closed
+	return true // <=> closed = false; return
 }
 
 type DownloadPart struct {
@@ -205,99 +207,127 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 
 	multiThreadChunkPool := pool.New(
 		10*time.Second, int(maxChunkSize),
-		(streams+ci.MultiThreadChunkAhead+1)/2, // one addition for temporary use
+		0, // we changed to zero to release chunk ASAP
 		true)
 	defer multiThreadChunkPool.Flush()
-
-	var waitingThread int32
-	streamDownloader := func(stream int) {
-		for {
-			atomic.AddInt32(&waitingThread, 1)
-			chunk := <-workQueue
-			atomic.AddInt32(&waitingThread, -1)
-			if stopped {
-				break
-			}
-			start := chunk.start
-			end := chunk.end
-			chunkI := chunk.chunkI
-
-			fs.Debugf(src, "multi-thread copy start: stream %d, chunk %d(%v) size %v", stream+1, chunkI, fs.SizeSuffix(start), fs.SizeSuffix(end-start))
-
-			startTime := time.Now()
-
-			rc, err := NewReOpen(ctx, src, ci.LowLevelRetries, &fs.RangeOption{Start: start, End: end - 1})
-			if err != nil {
-				safeChanSend(errChan, fmt.Errorf("multipart copy: failed to open source: %v", err))
-				return
-			}
-
-			var buf []byte
-			if end-start == maxChunkSize {
-				buf = multiThreadChunkPool.Get()
-			} else {
-				buf = make([]byte, end-start)
-			}
-
-			curReadOff := start
-			minRead := int64(3 * 1024 * 1024)
-			for {
-				curReadEnd := curReadOff + minRead
-				if curReadEnd > end {
-					curReadEnd = end
-				}
-				if curReadOff == curReadEnd {
-					// we're done
-					break
-				}
-				//fs.Debugf(src, "multi-thread copy: downloading trying to read buf %v-%v", curReadOff, curReadEnd)
-				n, err := io.ReadFull(rc, buf[curReadOff-start:curReadEnd-start])
-				curReadOff += int64(n)
-				if err != nil {
-					break
-				}
-				if curWaiting := atomic.LoadInt32(&waitingThread); curWaiting >= 1 {
-					if end-curReadOff > minRead {
-						// double splitting
-						newChunkSize := (end - curReadOff) / 2
-						splitPoint := curReadOff + newChunkSize
-						fs.Debugf(src, "multi-thread copy: re-split chunk %d into %v-%v-%v, curChunk downloaded %v", chunkI, fs.SizeSuffix(start), fs.SizeSuffix(splitPoint), fs.SizeSuffix(end), fs.SizeSuffix(curReadOff-start))
-						go safeChanSend(workQueue, DownloadPart{
-							chunkI,
-							splitPoint, end,
-						})
-						end = splitPoint
-					}
-				}
-			}
-
-			buf = buf[:end-start]
-			//buf, err := io.ReadAll(rc)
-
-			fs.Debugf(src, "multi-thread copy: chunk finish: stream %d, chunk %d size %v err %v, took %v", stream+1, fs.SizeSuffix(start), fs.SizeSuffix(end-start), err, time.Now().Sub(startTime))
-			if err != nil {
-				_ = rc.Close()
-				safeChanSend(errChan, err)
-				return
-			}
-			//safeChanSend(resultChan, ResultChunk{buf, chunkI})
-			safeChanSend(resultChan, ResultChunk{buf, chunkI, start, end})
-
-			if err := rc.Close(); err != nil {
-				safeChanSend(errChan, err)
-				return
-			}
+	releaseBuf := func(buf []byte, wait bool) {
+		if cap(buf) == int(maxChunkSize) {
+			multiThreadChunkPool.Put(buf)
 		}
 	}
+
+	var waitingThread int32
+	streamDownloadChunk := func(stream int, start, end int64, chunkI int) bool {
+		fs.Debugf(src, "multi-thread copy start: stream %d, chunk %d(%v) size %v", stream+1, chunkI, fs.SizeSuffix(start), fs.SizeSuffix(end-start))
+
+		startTime := time.Now()
+
+		rc, err := NewReOpen(ctx, src, ci.LowLevelRetries, &fs.RangeOption{Start: start, End: end - 1})
+		if err != nil {
+			safeChanSend(errChan, fmt.Errorf("multipart copy: failed to open source: %v", err))
+			return true
+		}
+
+		var buf []byte
+		if end-start == maxChunkSize {
+			// MUST ENSURE BUF ARE PUT BACK, OR mmap LEAKS
+			buf = multiThreadChunkPool.Get()
+		} else {
+			buf = make([]byte, end-start)
+		}
+		oribuf := buf // keep a reference to original buffer, as we may slice them afterwards
+		_ = oribuf
+
+		// Main read loop. NEVER RETURN OUT HERE!
+		curReadOff := start
+		minRead := int64(3 * 1024 * 1024)
+		for {
+			curReadEnd := curReadOff + minRead
+			if curReadEnd > end {
+				curReadEnd = end
+			}
+			if curReadOff == curReadEnd {
+				// we're done
+				break
+			}
+			//fs.Debugf(src, "multi-thread copy: downloading trying to read buf %v-%v", curReadOff, curReadEnd)
+			n, err := io.ReadFull(rc, buf[curReadOff-start:curReadEnd-start])
+			curReadOff += int64(n)
+			if err != nil {
+				break
+			}
+			if curWaiting := atomic.LoadInt32(&waitingThread); curWaiting >= 1 {
+				if end-curReadOff > minRead {
+					// double splitting
+					newChunkSize := (end - curReadOff) / 2
+					splitPoint := curReadOff + newChunkSize
+					fs.Debugf(src, "multi-thread copy: re-split chunk %d into %v-%v-%v, curChunk downloaded %v", chunkI, fs.SizeSuffix(start), fs.SizeSuffix(splitPoint), fs.SizeSuffix(end), fs.SizeSuffix(curReadOff-start))
+					go safeChanSend(workQueue, DownloadPart{
+						chunkI,
+						splitPoint, end,
+					})
+					end = splitPoint
+				}
+			}
+		}
+
+		bufSent := false
+		buf = buf[:end-start]
+		defer func() {
+			if !bufSent {
+				releaseBuf(oribuf, false)
+				oribuf = nil
+				buf = nil
+			}
+		}()
+
+		fs.Debugf(src, "multi-thread copy: chunk finish: stream %d, chunk %d size %v err %v, took %v", stream+1, fs.SizeSuffix(start), fs.SizeSuffix(end-start), err, time.Now().Sub(startTime))
+		if err != nil {
+			_ = rc.Close()
+			safeChanSend(errChan, err)
+			return true
+		}
+
+		bufSent = true
+		if !safeChanSend(resultChan, ResultChunk{buf, chunkI, start, end}) {
+			bufSent = false
+		}
+
+		if err := rc.Close(); err != nil {
+			safeChanSend(errChan, err)
+			return true
+		}
+		return false
+	}
+
 	for i := 0; i < streams; i++ {
-		go streamDownloader(i)
+		go func(stream int) {
+			defer func() {
+				fs.Debugf(src, "streamDownloader %d finished..", stream)
+			}()
+			for {
+				atomic.AddInt32(&waitingThread, 1)
+				chunk := <-workQueue
+				atomic.AddInt32(&waitingThread, -1)
+				if stopped {
+					break
+				}
+				start := chunk.start
+				end := chunk.end
+				chunkI := chunk.chunkI
+
+				streamDownloadChunk(stream, start, end, chunkI)
+			}
+		}(i)
 	}
 
 	curChunk := 0
-	//curChunkChan := make(chan int)
 	// 4. taskPutter, drive streamDownloader to download as many as N out-of-order chunks
 	//             i.e. download up to curChunk + N chunk
 	taskPutter := func() {
+		defer func() {
+			fs.Debugf(src, "taskPutter finished..")
+		}()
 		i := 1
 		for !stopped {
 			curMaxChunk := curChunk + streams + ci.MultiThreadChunkAhead
@@ -314,7 +344,6 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 			} else {
 				panic("shouldn't be here")
 			}
-			//<-curChunkChan
 		}
 	}
 	go taskPutter()
@@ -324,6 +353,17 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 	writerLoop := func() {
 		resultHeap := &chunkHeap{mu: &sync.Mutex{}}
 		deheap.Init(resultHeap)
+		defer func() {
+			remainingChunk := resultHeap.chunks
+			resultHeap.chunks = []ResultChunk{}
+			fs.Debugf(src, "Releasing %d dangling chunk", len(remainingChunk))
+			for _, chunk := range remainingChunk {
+				releaseBuf(chunk.buf, false)
+				chunk.buf = nil
+			}
+			multiThreadChunkPool.Flush()
+			fs.Debugf(src, "writer finished..")
+		}()
 
 		defer fs.CheckClose(writer, &err)
 
@@ -331,11 +371,14 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 		// Copy the data
 		for {
 			chunk := <-resultChan
+			if chunk.buf == nil {
+				break // chan closed
+			}
+			deheap.Push(resultHeap, chunk)
 			if stopped {
 				break
 			}
 			//fs.Debugf(src, "multi-thread copy: writeLoop: got chunk %d", chunk.index) // useless as this logic never errors
-			deheap.Push(resultHeap, chunk)
 			for {
 				hasCurChunk := false
 				resultHeap.SyncCall(func() {
@@ -361,16 +404,16 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 						safeChanSend(errChan, err)
 					}
 					fs.Debugf(src, "multi-thread copy: writeLoop: wrote chunk %d to pipe, took %v", curChunk, time.Now().Sub(startTime))
-					if cap(chunkContent.buf) == int(maxChunkSize) {
-						multiThreadChunkPool.Put(chunkContent.buf)
-					}
+
+					releaseBuf(chunkContent.buf, false)
+					chunkContent.buf = nil
+
 					if chunkTasks[curChunk].end == chunkContent.end {
 						curChunk = chunkContent.index + 1
 					} else {
 						curChunk = chunkContent.index
 					}
 					curChunkOff = chunkContent.end
-					//curChunkChan <- 1
 					//if curChunk == totalChunks {
 					if chunkContent.end == totalSize {
 						if curChunk != totalChunks {
@@ -392,18 +435,48 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 	// 6. f.Put call goroutine, call f.Put using pipeReader as input
 	//       we do in a separate goroutine, so we can still listen to errChan in the main goroutine
 	var obj fs.Object
-	go func() {
-		in := tr.Account(ctx, reader).WithBuffer() // account and buffer the transfer
+	go func() (err error) {
+		defer func() {
+			safeChanSend(errChan, err)
+		}()
+		in_ := tr.Account(ctx, reader).WithBuffer() // account and buffer the transfer
+		var in io.Reader = in_
+
 		var wrappedSrc fs.ObjectInfo = src
 		// We try to pass the original object if possible
 		if src.Remote() != remote {
 			wrappedSrc = fs.NewOverrideRemote(src, remote)
 		}
+
+		hasHash := ci.CheckSum
+		hashes := hash.NewHashSet(src.Fs().Hashes().GetOne()) // just pick one hash
+		var hasher *hash.MultiHasher
+		hasher, err = hash.NewMultiHasherTypes(hashes)
+		if err != nil {
+			fs.Debugf(src, "multi-thread hasher init failed, ignoring hash!")
+			hasHash = false
+		}
+
+		if hasHash {
+			in = io.TeeReader(in, hasher)
+		}
+
 		obj, err = f.Put(ctx, in, wrappedSrc)
 		if err != nil {
 			fs.Debugf(src, "multi-thread f.Put failed: %v!", err)
+			return err
 		}
-		safeChanSend(errChan, err)
+		if hasHash {
+			dst := object.NewStaticObjectInfo(obj.Remote(), obj.ModTime(ctx), obj.Size(), false, hasher.Sums(), src.Fs())
+			if dst.Size() != src.Size() {
+				return fmt.Errorf("multi-thread corrupted, size differs (%d vs %d)", dst.Size(), src.Size())
+			}
+			same, ht, _ := CheckHashes(ctx, dst, src)
+			if !same {
+				return fmt.Errorf("multi-thread corrupted, sum %v differs", ht)
+			}
+		}
+		return nil
 	}()
 
 	// (Postponed first small chunk Read & Send)
@@ -428,13 +501,15 @@ func multiThreadCopyChunked(ctx context.Context, f fs.Fs, remote string, src fs.
 
 	// emit stop signal
 	stopped = true
-	time.Sleep(4 * time.Second)
-
-	// cleanup everything
-	cancel()
-	close(errChan)
-	close(workQueue)
-	close(resultChan)
+	go func() {
+		time.Sleep(4 * time.Second)
+		// cleanup everything
+		cancel()
+		time.Sleep(4 * time.Second)
+		close(errChan)
+		close(workQueue)
+		close(resultChan)
+	}()
 	fs.Debugf(src, "multi-thread copy returned!")
 	return obj, err
 }
