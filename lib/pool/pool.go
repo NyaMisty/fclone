@@ -4,11 +4,12 @@ package pool
 
 import (
 	"fmt"
+	"github.com/rclone/rclone/lib/mmap"
 	"log"
+	"reflect"
 	"sync"
 	"time"
-
-	"github.com/rclone/rclone/lib/mmap"
+	"unsafe"
 )
 
 // Pool of internal buffers
@@ -33,6 +34,24 @@ type Pool struct {
 	free         func([]byte) error
 }
 
+var globalMmapTable = &sync.Map{}
+
+func init() {
+	go func() {
+		for {
+			totalChunks := 0
+			globalMmapTable.Range(func(key, value any) bool {
+				totalChunks++
+				return true
+			})
+			if totalChunks > 0 {
+				log.Printf("Current Mmap Chunks: %d", totalChunks)
+			}
+			time.Sleep(3 * time.Second)
+		}
+	}()
+}
+
 // New makes a buffer pool
 //
 // flushTime is the interval the buffer pools is flushed
@@ -47,8 +66,27 @@ func New(flushTime time.Duration, bufferSize, poolSize int, useMmap bool) *Pool 
 		bufferSize: bufferSize,
 	}
 	if useMmap {
-		bp.alloc = mmap.Alloc
-		bp.free = mmap.Free
+		//bp.alloc = mmap.Alloc
+		//bp.free = mmap.Free
+		//bp.alloc = mmap.Alloc
+		//bp.free = mmap.Free
+		bp.alloc = func(size int) ([]byte, error) {
+			buf, err := mmap.Alloc(size)
+			if err != nil {
+				return nil, err
+			}
+			sh := (*reflect.SliceHeader)(unsafe.Pointer(&buf))
+			globalMmapTable.Store(sh.Data, 1)
+			return buf, err
+		}
+		bp.free = func(buf []byte) error {
+			sh := (*reflect.SliceHeader)(unsafe.Pointer(&buf))
+			if _, ok := globalMmapTable.LoadAndDelete(sh.Data); !ok {
+				panic("unknown buffer returned to mmap!")
+			}
+			return mmap.Free(buf)
+		}
+
 	} else {
 		bp.alloc = func(size int) ([]byte, error) {
 			return make([]byte, size), nil
