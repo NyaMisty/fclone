@@ -1896,8 +1896,18 @@ func (d *noStopDownloader) Close() error {
 // copyURLFunc is called from CopyURLFn
 type copyURLFunc func(ctx context.Context, dstFileName string, in io.ReadCloser, size int64, modTime time.Time) (err error)
 
+// copyURLFuncEx is called from CopyURLFn
+type copyURLFuncEx func(ctx context.Context, dstFileName string, in io.ReadCloser, size int64, modTime time.Time, resp *http.Response) (err error)
+
 // copyURLFn copies the data from the url to the function supplied
 func copyURLFn(ctx context.Context, dstFileName string, url string, autoFilename, dstFileNameFromHeader bool, fn copyURLFunc) (err error) {
+	return copyURLFnEx(ctx, dstFileName, url, autoFilename, dstFileNameFromHeader, func(ctx context.Context, dstFileName string, in io.ReadCloser, size int64, modTime time.Time, resp *http.Response) (err error) {
+		return fn(ctx, dstFileName, in, size, modTime)
+	})
+}
+
+// copyURLFn copies the data from the url to the function supplied
+func copyURLFnEx(ctx context.Context, dstFileName string, url string, autoFilename, dstFileNameFromHeader bool, fn copyURLFuncEx) (err error) {
 	client := fshttp.NewClient(ctx)
 	resp, err := client.Get(url)
 	if err != nil {
@@ -1921,7 +1931,7 @@ func copyURLFn(ctx context.Context, dstFileName string, url string, autoFilename
 				return fmt.Errorf("CopyURL failed: filename not found in the Content-Disposition header")
 			}
 			fs.Debugf(headerFilename, "filename found in Content-Disposition header.")
-			return fn(ctx, headerFilename, resp.Body, resp.ContentLength, modTime)
+			return fn(ctx, headerFilename, resp.Body, resp.ContentLength, modTime, resp)
 		}
 
 		dstFileName = path.Base(resp.Request.URL.Path)
@@ -1930,7 +1940,7 @@ func copyURLFn(ctx context.Context, dstFileName string, url string, autoFilename
 		}
 		fs.Debugf(dstFileName, "File name found in url")
 	}
-	return fn(ctx, dstFileName, d, resp.ContentLength, modTime)
+	return fn(ctx, dstFileName, d, resp.ContentLength, modTime, resp)
 }
 
 // CopyURL copies the data from the url to (fdst, dstFileName)
@@ -1947,6 +1957,22 @@ func CopyURL(ctx context.Context, fdst fs.Fs, dstFileName string, url string, au
 		return err
 	})
 	return dst, err
+}
+
+// CopyURL copies the data from the url to (fdst, dstFileName)
+func CopyURLEx(ctx context.Context, fdst fs.Fs, dstFileName string, url string, autoFilename, dstFileNameFromHeader bool, noClobber bool) (dst fs.Object, rawResp *http.Response, err error) {
+	err = copyURLFnEx(ctx, dstFileName, url, autoFilename, dstFileNameFromHeader, func(ctx context.Context, dstFileName string, in io.ReadCloser, size int64, modTime time.Time, resp *http.Response) (err error) {
+		if noClobber {
+			_, err = fdst.NewObject(ctx, dstFileName)
+			if err == nil {
+				return errors.New("CopyURL failed: file already exist")
+			}
+		}
+		dst, err = RcatSize(ctx, fdst, dstFileName, in, size, modTime, nil)
+		rawResp = resp
+		return err
+	})
+	return dst, rawResp, err
 }
 
 // CopyURLToWriter copies the data from the url to the io.Writer supplied
